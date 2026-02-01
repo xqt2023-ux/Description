@@ -49,20 +49,31 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
 
   // Derive cut regions from deleted words
   const getCutRegions = useCallback(() => {
-    if (!transcript?.words) return [];
+    if (!transcript?.segments) return [];
+
+    // Flatten all words from all segments
+    const allWords = transcript.segments.flatMap(segment => 
+      segment.words.map(word => ({
+        ...word,
+        start: word.startTime,
+        end: word.endTime,
+      }))
+    );
+
+    if (allWords.length === 0) return [];
 
     const regions: Array<{ startTime: number; endTime: number }> = [];
     let regionStart: number | null = null;
 
-    for (let i = 0; i < transcript.words.length; i++) {
-      const word = transcript.words[i];
+    for (let i = 0; i < allWords.length; i++) {
+      const word = allWords[i];
       if (word.deleted) {
         if (regionStart === null) {
           regionStart = word.start;
         }
       } else {
         if (regionStart !== null) {
-          const lastDeletedWord = transcript.words[i - 1];
+          const lastDeletedWord = allWords[i - 1];
           regions.push({
             startTime: regionStart,
             endTime: lastDeletedWord.end,
@@ -74,7 +85,7 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
 
     // Handle trailing deleted words
     if (regionStart !== null) {
-      const lastWord = transcript.words[transcript.words.length - 1];
+      const lastWord = allWords[allWords.length - 1];
       regions.push({
         startTime: regionStart,
         endTime: lastWord.end,

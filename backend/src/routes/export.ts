@@ -73,7 +73,8 @@ router.post('/start', async (req: Request, res: Response, next: NextFunction) =>
     let cuts: CutRegion[] = cutRegions;
 
     try {
-      project = await storage.loadProject(projectId);
+      // Note: loadProject not implemented yet, use null for now
+      project = null; // TODO: implement storage.loadProject(projectId)
       if (project && project.mediaFile) {
         const uploadDir = process.env.UPLOAD_DIR || './uploads';
         mediaPath = path.join(uploadDir, 'videos', project.mediaFile);
@@ -462,15 +463,15 @@ function sendSSE(res: Response, event: string, data: any): void {
 
 // Legacy endpoints for backward compatibility
 router.post('/', async (req: Request, res: Response, next: NextFunction) => {
-  // Redirect to /start
-  req.url = '/start';
-  router.handle(req, res, next);
+  // Forward to /start handler
+  const { projectId, sourceFile, cutRegions, format, resolution, quality } = req.body;
+  req.body = { projectId, sourceFile, cutRegions, format, resolution, quality };
+  next('route'); // Skip to next matching route
 });
 
 router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
-  // Redirect to /status
-  req.url = `/${req.params.id}/status`;
-  router.handle(req, res, next);
+  // Forward to /status handler by redirecting
+  res.redirect(307, `/api/export/${req.params.id}/status`);
 });
 
 export { router as exportRoutes };

@@ -411,8 +411,8 @@ router.post('/:id/generate-waveform', async (req: Request, res: Response, next: 
     const uploadDir = process.env.UPLOAD_DIR || './uploads';
 
     // Find the media file
-    let mediaPath: string;
-    let filename: string;
+    let mediaPath: string = '';
+    let filename: string = '';
 
     if (media) {
       filename = media.filename;

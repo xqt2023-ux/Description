@@ -1,25 +1,29 @@
 <!--
   SYNC IMPACT REPORT
   ==================
-  Version change: N/A (initial) → 1.0.0
-  
-  Modified principles: None (initial creation)
-  
-  Added sections:
-  - Core Principles (5 total): User-Centric Design, Real-Time Performance, 
-    Type Safety & Contracts, Test Coverage, Graceful Degradation
-  - Development Standards
-  - Code Quality Gates
-  - Governance
-  
-  Removed sections: None (initial creation)
-  
+  Version change: 1.0.0 → 1.0.1
+
+  Modified principles: None
+
+  Added sections: None
+
+  Removed sections: None
+
+  Changes in this version:
+  - Clarified Prettier configuration requirements in Code Style section
+  - Clarified ESLint configuration requirements in Code Style section
+  - Added explicit pre-commit hook tooling guidance (husky + lint-staged)
+  - Updated Last Amended date to 2026-02-01
+
   Templates requiring updates:
-  - .specify/templates/plan-template.md: ✅ No updates needed (generic Constitution Check reference)
-  - .specify/templates/spec-template.md: ✅ No updates needed (generic structure)
-  - .specify/templates/tasks-template.md: ✅ No updates needed (generic structure)
-  
-  Follow-up TODOs: None
+  - .specify/templates/plan-template.md: ✅ No updates needed
+  - .specify/templates/spec-template.md: ✅ No updates needed
+  - .specify/templates/tasks-template.md: ✅ No updates needed
+
+  Follow-up TODOs:
+  - Install Prettier and create .prettierrc configuration file
+  - Install husky and lint-staged for pre-commit hook enforcement
+  - Verify ESLint configuration in both frontend and backend
 -->
 
 # Descript Clone Constitution
@@ -88,7 +92,7 @@ The system MUST handle failures gracefully:
 - **Frontend**: Next.js 14+ (App Router), TypeScript, Tailwind CSS, Zustand, React Query
 - **Backend**: Express.js, TypeScript, FFmpeg for video processing
 - **Shared**: TypeScript types in `shared/types/` consumed by both frontend and backend
-- **Testing**: Vitest (frontend), Jest (backend), Playwright (E2E)
+- **Testing**: Vitest (frontend + backend), Playwright (E2E)
 
 ### File Organization
 
@@ -99,8 +103,9 @@ The system MUST handle failures gracefully:
 
 ### Code Style
 
-- **Formatting**: Prettier with project defaults; enforced via pre-commit hooks
-- **Linting**: ESLint with TypeScript rules; zero warnings policy
+- **Formatting**: Prettier MUST be configured with a `.prettierrc` file at project root; MUST be enforced via pre-commit hooks (husky + lint-staged recommended)
+- **Linting**: ESLint MUST be configured with TypeScript rules in both frontend and backend; MUST enforce zero warnings policy; MUST run in pre-commit hooks
+- **Pre-commit Hooks**: MUST use husky (or equivalent) with lint-staged to run Prettier and ESLint before commits
 - **Naming**: PascalCase for components/types, camelCase for functions/variables, kebab-case for files
 - **Comments**: JSDoc for public APIs; inline comments for non-obvious logic only
 
@@ -134,4 +139,4 @@ This constitution defines non-negotiable standards for the Descript Clone projec
 - Violations require explicit justification and tech debt tracking
 - Use `.specify/memory/constitution.md` as the authoritative reference
 
-**Version**: 1.0.0 | **Ratified**: 2026-01-25 | **Last Amended**: 2026-01-25
+**Version**: 1.0.1 | **Ratified**: 2026-01-25 | **Last Amended**: 2026-02-01
