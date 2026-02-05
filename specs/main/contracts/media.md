@@ -2,9 +2,11 @@
 
 **Phase 1 Output** | **Date**: 2026-01-25
 
-## POST /api/media/upload
+## POST /api/media
 
 Upload a media file to the project.
+
+> **Note**: The endpoint path is `/api/media` (not `/api/media/upload`). The upload action is implied by the POST method.
 
 ### Request
 

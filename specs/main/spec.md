@@ -23,7 +23,9 @@ As a user, I can upload a video, receive an automatic transcription with timesta
 
 ### User Story 2 - Timeline Operations & Multi-track (Priority: P2)
 
-As a user, I can view the video timeline, add tracks (audio/video/text), split clips at cursor, and rearrange clips on separate tracks.
+As a user, I can view the video timeline, add tracks (audio/video), split clips at cursor, and rearrange clips on separate tracks.
+
+> **Note**: Text/caption tracks are deferred to post-MVP scope.
 
 **Why this priority**: Enables non-destructive editing and multi-track composition for richer edits.
 
@@ -48,27 +50,51 @@ As a user, I can export the edited timeline to a new MP4 file (H.264/AAC) with a
 
 ---
 
+### User Story 4 - AI-Driven Video Editing via Natural Language (Priority: P4)
+
+As a user, I can describe video editing operations in natural language (e.g., "delete the first 5 seconds", "remove filler words") and have the AI parse my intent, generate an edit plan, and execute the edits automatically.
+
+**Why this priority**: Extends the core editing workflow with AI assistance; builds on top of US1-US3 infrastructure.
+
+**Independent Test**: Type "删除前5秒" in the AI chat → AI parses intent → generates FFmpeg command → executes and returns edited video.
+
+**Acceptance Scenarios**:
+1. Given a loaded video, when I type "trim the first 10 seconds", then the AI generates an edit plan with a cut operation from 0s to 10s.
+2. Given an edit plan, when I confirm execution, then FFmpeg processes the video and I can download the result.
+3. Given a completed edit, when I click Undo, then the previous version is restored.
+
+---
+
 ## Requirements
 
 ### Functional Requirements
 
-- **FR-001**: System MUST allow video upload via `POST /api/media/upload` and return a file id and path.
+- **FR-001**: System MUST allow video upload via `POST /api/media` and return a file id and path.
 - **FR-002**: System MUST transcribe uploaded media using the Groq Whisper API and store word-level timestamps.
 - **FR-003**: Frontend MUST display transcript with selectable word ranges and map selections to timeline timestamps.
 - **FR-004**: System MUST support split/cut operations that update the timeline state and persist project edits locally.
 - **FR-005**: System MUST export timeline to MP4 via FFmpeg and provide progress updates.
+- **FR-006**: System MUST provide an AI chat endpoint (`POST /api/ai/chat`) that accepts natural language and returns contextual responses.
+- **FR-007**: System MUST parse user edit requests into structured `EditPlan` objects with specific FFmpeg instructions.
+- **FR-008**: System MUST execute edit plans via FFmpeg and track progress with undo/redo support.
+- **FR-009**: System MUST provide AI skills for transcript processing (filler word removal, summary, translation, chapter generation).
 
 ### Key Entities
 
 - **Media**: id, filename, path, duration, mimeType
 - **Transcript**: mediaId, words[{ text, start, end, confidence }]
 - **Project**: id, media[], tracks[], clips[]
+- **EditPlan**: id, mediaId, userRequest, instructions[], status, estimatedDuration
+- **EditInstruction**: type (cut/trim/add_text/speed_change), params, startTime, endTime, description
+- **EditHistory**: mediaId, currentVersion, history[], canUndo, canRedo
 
 ## Success Criteria (mandatory)
 
 - **SC-001**: P1 flow (upload → transcribe → cut) demonstrable end-to-end in development environment.
 - **SC-002**: Transcription contains word-level timestamps for >90% of spoken words on short test clips.
 - **SC-003**: Exported MP4 is playable and contains edits made in the timeline.
+- **SC-004**: AI can parse common edit intents (cut, trim, speed change) with >80% accuracy on test phrases.
+- **SC-005**: Edit undo/redo restores previous video state correctly.
 
 ## Non-Functional Requirements & Performance SLOs
 

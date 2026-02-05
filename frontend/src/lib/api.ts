@@ -57,13 +57,37 @@ export const projectApi = {
 
 // Media APIs
 export const mediaApi = {
+  // Validate if file is a valid video/audio using FFprobe
+  validate: (file: File): Promise<{
+    data: {
+      success: boolean;
+      valid: boolean;
+      type?: 'video' | 'audio' | 'unknown';
+      duration?: number;
+      width?: number;
+      height?: number;
+      codec?: string;
+      format?: string;
+      originalName?: string;
+      size?: number;
+      error?: string;
+    }
+  }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/media/validate', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000, // 1 minute for validation
+    });
+  },
+
   upload: (formDataOrFile: FormData | File, optionsOrProjectId?: any, onProgress?: (progress: number) => void) => {
     let formData: FormData;
     let config: any = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300000, // 5 minutes for large files
     };
-    
+
     if (formDataOrFile instanceof FormData) {
       formData = formDataOrFile;
       // Second param is options object with onUploadProgress
@@ -85,7 +109,7 @@ export const mediaApi = {
         };
       }
     }
-    
+
     return api.post('/media', formData, config);
   },
   
@@ -173,7 +197,7 @@ export const exportApi = {
   getStatus: (exportId: string) => api.get(`/exports/${exportId}`),
 };
 
-// AI APIs (Claude)
+// AI APIs (Claude/OpenAI via Babelark)
 export const aiApi = {
   chat: (messages: Array<{role: 'user' | 'assistant', content: string}>, systemPrompt?: string) =>
     api.post('/ai/chat', { messages, systemPrompt }),
@@ -188,4 +212,26 @@ export const aiApi = {
     api.post('/ai/execute-task', { task, transcript }),
   executeWorkflow: (tasks: any[], transcript: string) =>
     api.post('/ai/execute-workflow', { tasks, transcript }, { timeout: 120000 }), // 2 min timeout for multi-task
+  
+  // Video Edit Orchestration APIs
+  orchestrateEdit: (
+    userRequest: string,
+    mediaId: string,
+    mediaInfo: { duration: number; hasAudio: boolean; width?: number; height?: number },
+    autoExecute: boolean = true
+  ) => api.post('/ai/orchestrate', { userRequest, mediaId, mediaInfo, autoExecute }, { timeout: 180000 }), // 3 min timeout
+  
+  getPlanStatus: (planId: string) => api.get(`/ai/orchestrate/${planId}/status`),
+  
+  executePlan: (planId: string) => api.post(`/ai/orchestrate/${planId}/execute`, {}, { timeout: 180000 }),
+  
+  // Undo/Redo
+  undo: (mediaId: string) => api.post(`/ai/orchestrate/${mediaId}/undo`),
+  redo: (mediaId: string) => api.post(`/ai/orchestrate/${mediaId}/redo`),
+  getHistory: (mediaId: string) => api.get(`/ai/orchestrate/${mediaId}/history`),
+};
+
+// Direct file download helper
+export const downloadEditedVideo = (filename: string): string => {
+  return `${API_BASE_URL}/api/export/download/${filename}`;
 };

@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditorStore } from '@/stores/editorStore';
 import { transcriptionApi, mediaApi } from '@/lib/api';
+import { createTranscriptionStream } from '@/lib/useTranscriptionStream';
 import Link from 'next/link';
 import {
   Play,
@@ -206,8 +207,82 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
     }
   };
 
-  // Poll transcription with progress updates
+  // Store ref for SSE stream cleanup
+  const transcriptionStreamRef = useRef<{ close: () => void } | null>(null);
+
+  // Stream transcription updates via SSE (T051 - replaces polling for NFR-002 compliance)
+  const streamTranscriptionUpdates = useCallback((transcriptionId: string) => {
+    // Clean up any existing stream
+    if (transcriptionStreamRef.current) {
+      transcriptionStreamRef.current.close();
+    }
+
+    console.log('[SSE] Starting transcription stream for:', transcriptionId);
+
+    transcriptionStreamRef.current = createTranscriptionStream(transcriptionId, {
+      onStatusChange: (status, progress) => {
+        console.log('[SSE] Status update:', status, progress);
+        
+        if (status === 'completed') {
+          setProcessingStatus(prev => ({ ...prev, transcription: 'completed', transcriptionProgress: 100 }));
+          setTranscriptionStatus({ id: transcriptionId, status: 'completed', progress: 100 });
+          // Hide processing panel after a delay
+          setTimeout(() => setShowProcessingPanel(false), 2000);
+        } else if (status === 'error') {
+          setProcessingStatus(prev => ({ ...prev, transcription: 'error' }));
+          setTranscriptionStatus({ id: transcriptionId, status: 'error', progress: 0 });
+        } else {
+          setProcessingStatus(prev => ({ ...prev, transcriptionProgress: progress }));
+          setTranscriptionStatus({ id: transcriptionId, status: 'processing', progress });
+        }
+      },
+      onPartialTranscript: (partialText) => {
+        console.log('[SSE] Partial transcript received:', partialText.substring(0, 100) + '...');
+        // Could display partial transcript in UI for real-time feedback
+      },
+      onComplete: (transcript) => {
+        console.log('[SSE] Transcription completed:', transcript.id);
+        setTranscript({
+          id: transcript.id,
+          mediaId: transcript.mediaId || '',
+          language: transcript.language || 'en',
+          segments: transcript.segments || [],
+          createdAt: transcript.createdAt,
+          updatedAt: transcript.updatedAt,
+        });
+      },
+      onError: (error) => {
+        console.error('[SSE] Transcription error:', error);
+        setProcessingStatus(prev => ({ ...prev, transcription: 'error' }));
+        setTranscriptionStatus({ id: transcriptionId, status: 'error', progress: 0, error });
+      },
+      onClose: () => {
+        console.log('[SSE] Stream closed');
+        transcriptionStreamRef.current = null;
+      },
+    });
+  }, [setTranscript, setTranscriptionStatus]);
+
+  // Cleanup SSE stream on unmount
+  useEffect(() => {
+    return () => {
+      if (transcriptionStreamRef.current) {
+        transcriptionStreamRef.current.close();
+      }
+    };
+  }, []);
+
+  // Legacy polling fallback (kept for backward compatibility)
   const pollTranscriptionWithProgress = async (transcriptionId: string) => {
+    // Try SSE first (preferred for NFR-002 compliance)
+    try {
+      streamTranscriptionUpdates(transcriptionId);
+      return;
+    } catch (sseError) {
+      console.warn('[SSE] Failed to establish stream, falling back to polling:', sseError);
+    }
+
+    // Fallback to polling if SSE fails
     let progress = 0;
     const pollInterval = setInterval(async () => {
       try {
@@ -254,20 +329,29 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       const decodedUrl = decodeURIComponent(initialMediaUrl);
       setVideoUrl(decodedUrl);
       
-      // If we have a transcription ID from homepage, poll for its status
+      // If we have a transcription ID from homepage, stream its status via SSE
       if (initialTranscriptionId) {
-        console.log('Loading existing transcription:', initialTranscriptionId);
+        console.log('Loading existing transcription via SSE:', initialTranscriptionId);
         setTranscriptionStatus({ id: initialTranscriptionId, status: 'processing', progress: 50 });
-        pollExistingTranscription(initialTranscriptionId);
+        streamTranscriptionUpdates(initialTranscriptionId);
       } else {
         // Start new transcription
         startTranscription(initialMediaId, decodedUrl);
       }
     }
-  }, [initialMediaId, initialMediaUrl, initialTranscriptionId]);
+  }, [initialMediaId, initialMediaUrl, initialTranscriptionId, streamTranscriptionUpdates]);
 
-  // Poll for existing transcription status (from homepage)
+  // Poll for existing transcription status (legacy fallback)
   const pollExistingTranscription = async (transcriptionId: string) => {
+    // Use SSE by default (NFR-002 compliance)
+    try {
+      streamTranscriptionUpdates(transcriptionId);
+      return;
+    } catch {
+      console.warn('[SSE] Falling back to polling for existing transcription');
+    }
+
+    // Legacy polling fallback
     const pollInterval = setInterval(async () => {
       try {
         const statusResponse = await transcriptionApi.getById(transcriptionId);
@@ -311,7 +395,7 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
     }, 5 * 60 * 1000);
   };
 
-  // Start transcription after upload
+  // Start transcription after upload - uses SSE for real-time updates (T051)
   const startTranscription = async (mediaId: string, mediaUrl: string) => {
     try {
       setTranscriptionStatus({ id: '', status: 'processing', progress: 0 });
@@ -322,48 +406,8 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       
       setTranscriptionStatus({ id: transcriptionId, status: 'processing', progress: 10 });
       
-      // Poll for transcription status
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusResponse = await transcriptionApi.getById(transcriptionId);
-          const data = statusResponse.data.data;
-          
-          setTranscriptionStatus({ 
-            id: transcriptionId, 
-            status: data.status, 
-            progress: data.progress 
-          });
-          
-          if (data.status === 'completed') {
-            clearInterval(pollInterval);
-            // Set transcript data
-            setTranscript({
-              id: transcriptionId,
-              mediaId: mediaId,
-              language: data.language || 'en',
-              segments: data.segments || [],
-              createdAt: data.createdAt,
-              updatedAt: data.updatedAt,
-            });
-            setTranscriptionStatus({ id: transcriptionId, status: 'completed', progress: 100 });
-          } else if (data.status === 'error') {
-            clearInterval(pollInterval);
-            setTranscriptionStatus({ 
-              id: transcriptionId, 
-              status: 'error', 
-              progress: 0, 
-              error: data.error 
-            });
-          }
-        } catch (error) {
-          console.error('Error polling transcription status:', error);
-        }
-      }, 1500);
-      
-      // Timeout after 5 minutes for real transcription
-      setTimeout(() => {
-        clearInterval(pollInterval);
-      }, 300000);
+      // Use SSE for real-time updates (NFR-002: partial transcript within 5 seconds)
+      streamTranscriptionUpdates(transcriptionId);
       
     } catch (error) {
       console.error('Error starting transcription:', error);

@@ -13,6 +13,271 @@ const router = Router();
 // In-memory storage (replace with database in production)
 let mediaFiles: any[] = [];
 
+// Media registry JSON file path
+const MEDIA_REGISTRY_PATH = path.join(process.env.UPLOAD_DIR || './uploads', 'media-registry.json');
+
+// Save media registry to JSON file
+const saveMediaRegistry = () => {
+  try {
+    fs.writeFileSync(MEDIA_REGISTRY_PATH, JSON.stringify(mediaFiles, null, 2), 'utf-8');
+    console.log(`[Media] Saved ${mediaFiles.length} files to registry`);
+  } catch (error) {
+    console.error('[Media] Failed to save media registry:', error);
+  }
+};
+
+// Load media registry from JSON file
+const loadMediaRegistry = (): boolean => {
+  try {
+    if (fs.existsSync(MEDIA_REGISTRY_PATH)) {
+      const data = fs.readFileSync(MEDIA_REGISTRY_PATH, 'utf-8');
+      mediaFiles = JSON.parse(data);
+      console.log(`[Media] Loaded ${mediaFiles.length} files from registry`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error('[Media] Failed to load media registry:', error);
+    return false;
+  }
+};
+
+// Initialize: scan existing videos on startup
+const initializeMediaFromDisk = async () => {
+  // First try to load from registry
+  if (loadMediaRegistry()) {
+    console.log('[Media] Successfully loaded from registry, skipping disk scan');
+    return;
+  }
+
+  console.log('[Media] No registry found, scanning disk...');
+  const uploadDir = process.env.UPLOAD_DIR || './uploads';
+  const videosDir = path.join(uploadDir, 'videos');
+
+  if (!fs.existsSync(videosDir)) {
+    console.log('[Media] Videos directory does not exist, skipping initialization');
+    return;
+  }
+
+  try {
+    const files = fs.readdirSync(videosDir);
+    console.log(`[Media] Found ${files.length} files in videos directory`);
+
+    for (const filename of files) {
+      // Skip non-video files
+      if (!filename.match(/\.(mp4|mov|avi|mkv|webm|flv|wmv|m4v)$/i)) {
+        continue;
+      }
+
+      const filePath = path.join(videosDir, filename);
+      const stats = fs.statSync(filePath);
+      const id = filename.replace(/\.[^.]+$/, ''); // Use filename without extension as ID
+
+      // Check if already in mediaFiles
+      if (mediaFiles.find(m => m.id === id)) {
+        continue;
+      }
+
+      // Try to get metadata
+      let metadata: any = {};
+      try {
+        const videoMeta = await getVideoMetadata(filePath);
+        metadata = {
+          duration: videoMeta.duration,
+          width: videoMeta.width,
+          height: videoMeta.height,
+          fps: videoMeta.fps,
+          codec: videoMeta.codec,
+          bitrate: videoMeta.bitrate,
+        };
+      } catch (e) {
+        console.warn(`[Media] Failed to get metadata for ${filename}:`, e);
+      }
+
+      const media = {
+        id,
+        projectId: null,
+        filename,
+        originalName: filename,
+        mimetype: 'video/mp4',
+        size: stats.size,
+        url: `/uploads/videos/${filename}`,
+        filePath,
+        type: 'video',
+        thumbnails: [],
+        thumbnailCount: 0,
+        createdAt: stats.mtime.toISOString(),
+        metadata,
+        // Flatten metadata for frontend compatibility
+        duration: metadata.duration,
+        width: metadata.width,
+        height: metadata.height,
+      };
+
+      mediaFiles.push(media);
+    }
+
+    console.log(`[Media] Loaded ${mediaFiles.length} media files from disk`);
+    // Save to registry for next startup
+    saveMediaRegistry();
+  } catch (error) {
+    console.error('[Media] Error initializing media from disk:', error);
+  }
+};
+
+// Run initialization
+initializeMediaFromDisk();
+
+/**
+ * POST /api/media/validate
+ * Validate if uploaded file is a valid video/audio using FFprobe
+ */
+router.post('/validate', upload.single('file'), handleUploadError, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        error: 'No file uploaded',
+      });
+    }
+
+    const uploadDir = process.env.UPLOAD_DIR || './uploads';
+    const tempDir = path.join(uploadDir, 'temp');
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    // File is already saved by multer, get its path
+    const tempPath = req.file.path;
+
+    // Use FFprobe to validate the file
+    const validateWithFFprobe = (): Promise<{
+      valid: boolean;
+      type: 'video' | 'audio' | 'unknown';
+      duration?: number;
+      width?: number;
+      height?: number;
+      codec?: string;
+      format?: string;
+      error?: string;
+    }> => {
+      return new Promise((resolve) => {
+        const ffprobe = spawn('ffprobe', [
+          '-v', 'error',
+          '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name,width,height',
+          '-of', 'json',
+          tempPath
+        ]);
+
+        let stdout = '';
+        let stderr = '';
+
+        ffprobe.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        ffprobe.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        ffprobe.on('close', (code) => {
+          // Clean up temp file
+          try {
+            if (fs.existsSync(tempPath)) {
+              fs.unlinkSync(tempPath);
+            }
+          } catch (e) {
+            console.warn('Failed to delete temp file:', e);
+          }
+
+          if (code !== 0 || !stdout.trim()) {
+            resolve({
+              valid: false,
+              type: 'unknown',
+              error: stderr || 'FFprobe failed to analyze file',
+            });
+            return;
+          }
+
+          try {
+            const info = JSON.parse(stdout);
+            const streams = info.streams || [];
+            const format = info.format || {};
+
+            // Check for video or audio streams
+            const videoStream = streams.find((s: any) => s.codec_type === 'video');
+            const audioStream = streams.find((s: any) => s.codec_type === 'audio');
+
+            if (!videoStream && !audioStream) {
+              resolve({
+                valid: false,
+                type: 'unknown',
+                error: 'No video or audio streams found in file',
+              });
+              return;
+            }
+
+            const type = videoStream ? 'video' : 'audio';
+            const duration = parseFloat(format.duration) || 0;
+
+            resolve({
+              valid: true,
+              type,
+              duration,
+              width: videoStream?.width,
+              height: videoStream?.height,
+              codec: videoStream?.codec_name || audioStream?.codec_name,
+              format: format.format_name,
+            });
+          } catch (parseError) {
+            resolve({
+              valid: false,
+              type: 'unknown',
+              error: 'Failed to parse FFprobe output',
+            });
+          }
+        });
+
+        ffprobe.on('error', (err) => {
+          // Clean up temp file
+          try {
+            if (fs.existsSync(tempPath)) {
+              fs.unlinkSync(tempPath);
+            }
+          } catch (e) {
+            console.warn('Failed to delete temp file:', e);
+          }
+
+          resolve({
+            valid: false,
+            type: 'unknown',
+            error: `FFprobe error: ${err.message}`,
+          });
+        });
+      });
+    };
+
+    const result = await validateWithFFprobe();
+
+    res.json({
+      success: true,
+      ...result,
+      originalName: req.file.originalname,
+      size: req.file.size,
+    });
+  } catch (error: any) {
+    console.error('Validation error:', error);
+    res.status(500).json({
+      success: false,
+      valid: false,
+      error: error.message || 'Validation failed',
+    });
+  }
+});
+
 /**
  * POST /api/media (T013)
  * Upload media with duration extraction for video/audio
@@ -37,10 +302,12 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
 
     // Extract metadata for video/audio files
     let metadata: any = {};
+    let mediaPath = '';
     
     if (type === 'video' || type === 'audio') {
       try {
         const filePath = path.join(process.cwd(), 'uploads', type === 'video' ? 'videos' : 'audio', uploadResult.filename);
+        mediaPath = filePath;
         const videoMeta = await getVideoMetadata(filePath);
         
         metadata = {
@@ -55,6 +322,8 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
         console.warn('Failed to extract metadata:', metaError);
         // Continue without metadata - it's not critical
       }
+    } else if (type === 'image') {
+      mediaPath = path.join(process.cwd(), 'uploads', 'images', uploadResult.filename);
     }
 
     const media = {
@@ -65,6 +334,7 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
       mimetype: req.file.mimetype,
       size: uploadResult.size,
       url: uploadResult.url,
+      filePath: mediaPath,  // Add filePath for transcription
       type,
       thumbnails: [],
       thumbnailCount: 0,
@@ -73,6 +343,9 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
     };
 
     mediaFiles.push(media);
+
+    // Save to registry
+    saveMediaRegistry();
 
     res.status(201).json({
       success: true,
@@ -110,6 +383,9 @@ router.post('/:id/thumbnails', async (req: Request, res: Response) => {
     // Update media with thumbnail URLs
     media.thumbnails = [...(media.thumbnails || []), ...thumbnailUrls];
     media.thumbnailCount = media.thumbnails.length;
+
+    // Save to registry
+    saveMediaRegistry();
 
     res.json({
       success: true,
@@ -183,6 +459,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
     }
 
     mediaFiles.splice(index, 1);
+
+    // Save to registry
+    saveMediaRegistry();
 
     res.json({
       success: true,
@@ -376,6 +655,9 @@ router.post('/:id/generate-thumbnails', async (req: Request, res: Response) => {
       media.thumbnails = thumbnailUrls;
       media.thumbnailCount = thumbnailUrls.length;
       media.duration = duration;
+
+      // Save to registry
+      saveMediaRegistry();
     }
 
     console.log(`Generated ${thumbnailUrls.length} thumbnails successfully`);
@@ -511,6 +793,9 @@ router.post('/:id/generate-waveform', async (req: Request, res: Response, next: 
     // Update media with waveform data
     if (media) {
       media.waveform = waveformData;
+
+      // Save to registry
+      saveMediaRegistry();
     }
 
     res.json({
@@ -525,5 +810,10 @@ router.post('/:id/generate-waveform', async (req: Request, res: Response, next: 
     next(error);
   }
 });
+
+// Export function to get media by ID (for use in other routes)
+export function getMediaById(mediaId: string): any | undefined {
+  return mediaFiles.find(m => m.id === mediaId);
+}
 
 export { router as mediaRoutes };

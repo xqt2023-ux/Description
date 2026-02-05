@@ -219,12 +219,13 @@ T020 → T021
 
 | Metric | Count |
 |--------|-------|
-| **Total Tasks** | 52 |
+| **Total Tasks** | 73 |
 | **Setup (Phase 1)** | 3 |
 | **Foundational (Phase 2)** | 5 |
 | **US1 - Import/Transcribe/Edit (P1)** | 13 |
 | **US2 - Timeline Operations (P2)** | 9 |
 | **US3 - Export Video (P3)** | 7 |
+| **US4 - AI 对话编辑 (P4)** | 21 |
 | **Polish (Phase 6)** | 5 |
 | **Testing & Documentation** | 6 |
 | **Additional Tasks** | 4 |
@@ -237,6 +238,7 @@ T020 → T021
 | US1 | Upload video → transcription appears → select words → cut → playback reflects edit |
 | US2 | Add track → split clip at playhead → move clips independently |
 | US3 | Click Export → progress shows → MP4 downloads |
+| US4 | 输入 "删除前5秒" → AI 解析 → 执行编辑 → 返回结果视频 |
 
 ### Suggested MVP Scope
 
@@ -245,7 +247,7 @@ T020 → T021
 ## Final Phase: Testing & Documentation
 
 - [ ] T043 Add Vitest unit tests for `frontend/src/lib/utils.ts` and `backend/src/services/transcription.ts` (`frontend/__tests__`, `backend/tests`)
-- [ ] T044 Add Playwright E2E tests for upload→transcribe→cut→playback flow in `frontend/e2e/`
+- [X] T044 Add Playwright E2E tests for upload→transcribe→cut→playback flow in `frontend/e2e/`
 - [ ] T045 Add contract/unit tests to validate `shared/types` serialization and API request/response shapes
 - [ ] T046 Add CI job config (GitHub Actions) to run `npx tsc --noEmit`, `npm run lint`, `npx vitest` and optionally Playwright smoke tests
 - [ ] T047 Update `README.md` and `specs/main/quickstart.md` with developer steps and P1 demo script
@@ -253,10 +255,49 @@ T020 → T021
 
 # Additional Tasks (Validation & Job Semantics)
 
-- [ ] T049 Add transcript accuracy test harness and sample corpus in `specs/main/tests/accuracy/` to validate SC-002 (automated script and sample audio files)
-- [ ] T050 [MOVED to T005b] Job semantics now in Phase 2 Foundational
-- [ ] T051 [US1] Add streaming transcript UI with SSE handling in `frontend/src/components/editor/TranscriptEditor.tsx` (per NFR-002)
-- [ ] T052 Add SC-002 validation task: measure transcription accuracy on sample corpus (target: >90% word-level coverage)
+- [X] T049 Add transcript accuracy test harness and sample corpus in `specs/main/tests/accuracy/` to validate SC-002 (automated script and sample audio files)
+- [X] T051 [US1] Add streaming transcript UI with SSE handling in `frontend/src/components/editor/DescriptEditor.tsx` (per NFR-002)
+- [X] T052 Add SC-002 validation task: measure transcription accuracy on sample corpus (target: >90% word-level coverage)
+
+---
+
+## Phase 7: User Story 4 - AI 对话驱动视频编辑 (Priority: P4)
+
+**Goal**: 用户可以通过自然语言对话指示 AI 执行视频编辑操作（剪切、添加文字、调速等）
+
+**Independent Test**: 输入 "删除前5秒" → AI 解析意图 → 生成编辑计划 → 执行 FFmpeg → 返回编辑后视频
+
+### Backend Implementation for US4
+
+- [X] T053 [US4] Implement AI chat service with OpenAI GPT-4 in `backend/src/services/openai.ts`
+- [X] T054 [US4] Implement Claude fallback service in `backend/src/services/claude.ts`
+- [X] T055 [US4] Create video edit orchestration service with intent parsing in `backend/src/services/videoEditOrchestration.ts`
+- [X] T056 [US4] Implement `parseUserRequest()` to extract edit intent (cut/trim/add_text/speed_change) from natural language
+- [X] T057 [US4] Implement `generateEditPlan()` to create step-by-step FFmpeg instructions
+- [X] T058 [US4] Implement `executeEditPlan()` to run FFmpeg commands with progress tracking
+- [X] T059 [US4] Create `POST /api/ai/chat` endpoint for general AI conversations in `backend/src/routes/ai.ts`
+- [X] T060 [US4] Create `POST /api/ai/orchestrate` endpoint for video edit orchestration in `backend/src/routes/ai.ts`
+- [X] T061 [US4] Create `GET /api/ai/orchestrate/:planId/status` for plan status polling
+- [X] T062 [US4] Create `POST /api/ai/orchestrate/:planId/execute` for manual plan execution
+- [X] T063 [US4] Implement undo/redo system with edit history in `backend/src/services/videoEditOrchestration.ts`
+- [X] T064 [US4] Create `POST /api/ai/orchestrate/:mediaId/undo` and `/redo` endpoints
+
+### Frontend Implementation for US4
+
+- [X] T065 [P] [US4] Add AI API client methods (`aiApi.orchestrateEdit`, `aiApi.planTasks`, `aiApi.undo/redo`) in `frontend/src/lib/api.ts`
+- [X] T066 [US4] Add AI skills API (`removeFillerWords`, `generateSummary`, `suggestCuts`, etc.) in `backend/src/routes/ai.ts`
+
+### AI Skills Implemented
+
+- [X] T067 [US4] Filler word removal skill (`/api/ai/skills/remove-filler-words`)
+- [X] T068 [US4] Summary generation skill (`/api/ai/skills/generate-summary`)
+- [X] T069 [US4] Show notes generation skill (`/api/ai/skills/generate-show-notes`)
+- [X] T070 [US4] Social posts generation skill (`/api/ai/skills/generate-social-posts`)
+- [X] T071 [US4] Cut suggestions skill (`/api/ai/skills/suggest-cuts`)
+- [X] T072 [US4] Translation skill (`/api/ai/skills/translate`)
+- [X] T073 [US4] Chapter generation skill (`/api/ai/skills/generate-chapters`)
+
+**Checkpoint**: User Story 4 (AI 对话编辑) should be functional — 用户可通过对话执行视频编辑
 
 
 

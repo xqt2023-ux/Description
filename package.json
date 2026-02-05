@@ -6,11 +6,17 @@
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "cd backend && npm run dev",
     "dev:frontend": "cd frontend && npm run dev",
+    "build": "concurrently \"npm run build:backend\" \"npm run build:frontend\"",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
     "test": "npm run test:backend && npm run test:frontend",
     "test:backend": "cd backend && npm test",
     "test:frontend": "cd frontend && npm test",
     "test:all": "concurrently \"npm run test:backend\" \"npm run test:frontend\"",
-    "predev": "npm run test"
+    "predev": "npm run test",
+    "start": "powershell -ExecutionPolicy Bypass -File scripts/start-and-test.ps1",
+    "restart": "powershell -Command \"Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in @(3000, 3001) } | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }; Start-Sleep -Seconds 2; npm run dev\"",
+    "check": "powershell -Command \"$ports=@(3000,3001); foreach($p in $ports){$c=Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.LocalPort -eq $p}; if($c){Write-Host \\\"Port $p: Running (PID $($c.OwningProcess))\\\" -ForegroundColor Green}else{Write-Host \\\"Port $p: Not running\\\" -ForegroundColor Red}}\""
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

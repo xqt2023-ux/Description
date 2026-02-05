@@ -461,6 +461,81 @@ function sendSSE(res: Response, event: string, data: any): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+/**
+ * GET /api/export/download/:filename
+ * Direct download of exported file by filename
+ * Used for AI edit results download
+ */
+router.get('/download/:filename', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const filename = req.params.filename;
+
+    // Security: only allow specific file patterns
+    if (!filename.match(/^(edited-|dubbed-|export_)[a-zA-Z0-9-]+\.(mp4|webm|gif)$/)) {
+      throw Errors.validation('Invalid filename format');
+    }
+
+    const exportsDir = process.env.UPLOAD_DIR
+      ? path.join(process.env.UPLOAD_DIR, 'exports')
+      : './uploads/exports';
+
+    const filePath = path.join(exportsDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      throw Errors.notFound('Export file');
+    }
+
+    const ext = path.extname(filename).toLowerCase();
+    const contentType = ext === '.mp4' ? 'video/mp4' :
+                        ext === '.webm' ? 'video/webm' : 'image/gif';
+
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', contentType);
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/export/audio/:filename
+ * Download TTS audio file
+ * Used for dubbing workflow intermediate results
+ */
+router.get('/audio/:filename', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const filename = req.params.filename;
+
+    // Security: only allow TTS audio files
+    if (!filename.match(/^tts-[a-f0-9-]+\.(mp3|wav)$/)) {
+      throw Errors.validation('Invalid audio filename format');
+    }
+
+    const audioDir = process.env.UPLOAD_DIR
+      ? path.join(process.env.UPLOAD_DIR, 'audio')
+      : './uploads/audio';
+
+    const filePath = path.join(audioDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      throw Errors.notFound('Audio file');
+    }
+
+    const ext = path.extname(filename).toLowerCase();
+    const contentType = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
+
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', contentType);
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Legacy endpoints for backward compatibility
 router.post('/', async (req: Request, res: Response, next: NextFunction) => {
   // Forward to /start handler

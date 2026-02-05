@@ -7,6 +7,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { v4 as uuidv4 } from 'uuid';
 import { jobStore, Job } from './jobs';
 import { Transcript, TranscriptSegment, Word } from '../../../shared/types';
+import { storeTranscript } from './dubbing';
 
 // Get proxy agent if configured
 function getHttpAgent() {
@@ -21,6 +22,12 @@ function getHttpAgent() {
 // Lazy initialization of clients
 let groqClient: Groq | null = null;
 let openaiClient: OpenAI | null = null;
+
+// Reset clients (for testing)
+export function resetClients(): void {
+  groqClient = null;
+  openaiClient = null;
+}
 
 function getGroqClient(): Groq {
   if (!groqClient) {
@@ -324,6 +331,10 @@ async function processTranscriptionJob(jobId: string): Promise<void> {
     const transcript = convertToTranscript(mediaId, result);
 
     jobStore.update(jobId, { progress: 90 });
+
+    // Store transcript for dubbing workflow
+    storeTranscript(mediaId, transcript);
+    console.log(`[Transcription] Stored transcript for dubbing, mediaId: ${mediaId}`);
 
     // Complete
     jobStore.update(jobId, {

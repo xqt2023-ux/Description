@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -35,7 +35,7 @@ import {
   Loader2,
   X,
 } from 'lucide-react';
-import { mediaApi, aiApi, transcriptionApi } from '@/lib/api';
+import { mediaApi, aiApi, transcriptionApi, downloadEditedVideo, getUploadUrl } from '@/lib/api';
 
 export default function HomePage() {
   const router = useRouter();
@@ -44,6 +44,16 @@ export default function HomePage() {
   const [activeNav, setActiveNav] = useState('home');
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isValidatingFile, setIsValidatingFile] = useState(false);
+  const [fileValidationError, setFileValidationError] = useState<string | null>(null);
+  const [fileMediaInfo, setFileMediaInfo] = useState<{
+    type: 'video' | 'audio';
+    duration?: number;
+    width?: number;
+    height?: number;
+    codec?: string;
+    format?: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Translate & dub workflow states
@@ -75,28 +85,121 @@ export default function HomePage() {
   }>>([]);
   const [workflowType, setWorkflowType] = useState<'translate' | 'general'>('translate');
 
+  // Video Edit Orchestration states
+  const [orchestrationStatus, setOrchestrationStatus] = useState<'idle' | 'planning' | 'awaiting_confirmation' | 'executing' | 'completed' | 'error'>('idle');
+  const [editPlan, setEditPlan] = useState<{
+    planId: string;
+    operations: Array<{
+      type: string;
+      description: string;
+      parameters: any;
+      estimatedDuration?: number;
+    }>;
+    summary: string;
+  } | null>(null);
+  const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
+  const [orchestrationProgress, setOrchestrationProgress] = useState(0);
+  const [outputVideoUrl, setOutputVideoUrl] = useState<string | null>(null);
+  const [outputVideoFilename, setOutputVideoFilename] = useState<string | null>(null);
+  const [mediaMetadata, setMediaMetadata] = useState<{ duration: number; hasAudio: boolean; width?: number; height?: number } | null>(null);
+  const [ffmpegCommand, setFfmpegCommand] = useState<string | null>(null);
+
+  // Media list states
+  const [mediaList, setMediaList] = useState<Array<{
+    id: string;
+    originalName: string;
+    filePath: string;
+    thumbnailPath?: string;
+    duration?: number;
+    width?: number;
+    height?: number;
+    createdAt: string;
+  }>>([]);
+  const [isLoadingMedia, setIsLoadingMedia] = useState(true);
+
+  // Fetch media list function (extracted for reuse)
+  const fetchMediaList = async () => {
+    try {
+      setIsLoadingMedia(true);
+      const response = await mediaApi.getAll();
+      if (response.data.success && response.data.data) {
+        setMediaList(response.data.data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch media:', error);
+    } finally {
+      setIsLoadingMedia(false);
+    }
+  };
+
+  // Fetch media list on mount
+  useEffect(() => {
+    fetchMediaList();
+  }, []);
+
   const handleNewProject = () => {
     router.push('/editor/new');
   };
 
-  // 选择文件（不上传，不转录）
-  const handleFileSelect = (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    
-    const file = files[0];
-    
-    // 验证文件类型
-    if (!file.type.startsWith('video/') && !file.type.startsWith('audio/')) {
-      alert('请上传视频或音频文件');
+  // 选择文件（不上传，不转录）- 使用后端 FFprobe 验证
+  const handleFileSelect = async (files: FileList | null) => {
+    console.log('[handleFileSelect] called with files:', files);
+    if (!files || files.length === 0) {
+      console.log('[handleFileSelect] No files provided');
       return;
     }
 
-    setSelectedFile(file);
+    const file = files[0];
+    console.log('[handleFileSelect] Processing file:', file.name, 'type:', file.type, 'size:', file.size);
+
+    // 重置状态
+    setSelectedFile(null);
+    setFileValidationError(null);
+    setFileMediaInfo(null);
+    setIsValidatingFile(true);
+
+    try {
+      // 调用后端 API 使用 FFprobe 验证文件
+      console.log('[handleFileSelect] Calling backend validation API...');
+      const response = await mediaApi.validate(file);
+      const result = response.data;
+
+      console.log('[handleFileSelect] Validation result:', result);
+
+      if (result.valid && (result.type === 'video' || result.type === 'audio')) {
+        // 文件有效
+        setSelectedFile(file);
+        setFileMediaInfo({
+          type: result.type,
+          duration: result.duration,
+          width: result.width,
+          height: result.height,
+          codec: result.codec,
+          format: result.format,
+        });
+        console.log('[handleFileSelect] File validated successfully:', result.type);
+      } else {
+        // 文件无效
+        const errorMsg = result.error || '该文件不是有效的视频或音频文件';
+        setFileValidationError(errorMsg);
+        console.log('[handleFileSelect] File validation failed:', errorMsg);
+        alert(errorMsg);
+      }
+    } catch (error: any) {
+      console.error('[handleFileSelect] Validation API error:', error);
+      const errorMsg = error.response?.data?.error || error.message || '文件验证失败，请重试';
+      setFileValidationError(errorMsg);
+      alert(errorMsg);
+    } finally {
+      setIsValidatingFile(false);
+    }
   };
 
   // 移除选中的文件
   const handleRemoveFile = () => {
     setSelectedFile(null);
+    setFileValidationError(null);
+    setFileMediaInfo(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -217,7 +320,10 @@ export default function HomePage() {
       const mediaId = uploadResponse.data.data.id;
       const filePath = uploadResponse.data.data.filePath;
       setUploadedMediaId(mediaId);
-      
+
+      // Refresh media list after successful upload
+      fetchMediaList();
+
       setWorkflowMessages(prev => [
         ...prev.filter(m => m.type !== 'status'),
         { type: 'status', content: 'Upload complete! Extracting audio...' },
@@ -303,11 +409,17 @@ export default function HomePage() {
       console.log('No files selected');
       return;
     }
-    
+
     const file = files[0];
     console.log('File selected:', file.name, file.type, file.size);
-    
-    if (!file.type.startsWith('video/') && !file.type.startsWith('audio/')) {
+
+    // 验证文件类型 - 通过 MIME 类型或扩展名
+    const isValidByType = file.type.startsWith('video/') || file.type.startsWith('audio/');
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const validExtensions = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac', 'wma'];
+    const isValidByExtension = validExtensions.includes(ext);
+
+    if (!isValidByType && !isValidByExtension) {
       alert('请上传视频或音频文件');
       return;
     }
@@ -321,110 +433,244 @@ export default function HomePage() {
     ]);
   };
 
-  // Handle AI edit request
+  // Handle AI edit request - parse user's video editing requirements and show plan for confirmation
   const handleAiEditRequest = async () => {
     if (!aiInput.trim() || isPlanning || isExecuting) return;
+    if (!uploadedMediaId) {
+      setWorkflowMessages(prev => [
+        ...prev,
+        { type: 'assistant', content: '⚠️ Please upload a video first before requesting edits.' },
+      ]);
+      return;
+    }
 
     const userRequest = aiInput.trim();
     setAiInput('');
     setIsPlanning(true);
-    
+    setOrchestrationStatus('planning');
+
     // Add user message
     setWorkflowMessages(prev => [
       ...prev,
       { type: 'user', content: userRequest },
-      { type: 'status', content: 'Planning tasks...' },
+      { type: 'status', content: '🔍 Analyzing your request and planning video editing tasks...' },
     ]);
 
     try {
-      // Call AI to plan tasks
-      const response = await aiApi.planTasks(userRequest, {
-        hasTranscript: true, // For now assume we have transcript after upload
-        mediaType: translateFile?.type.startsWith('video/') ? 'video' : 'audio',
-      });
-
-      if (response.data.success && response.data.data) {
-        const { tasks, summary } = response.data.data;
-        
-        setEditTasks(tasks);
-        setWorkflowMessages(prev => [
-          ...prev.filter(m => m.type !== 'status'),
-          { type: 'assistant', content: summary },
-        ]);
-
-        // Add task items to messages
-        tasks.forEach((task: any) => {
-          setWorkflowMessages(prev => [
-            ...prev,
-            { type: 'task', content: task.name, taskStatus: 'pending' },
-          ]);
-        });
-
-        // Auto-execute tasks
-        setIsPlanning(false);
-        setIsExecuting(true);
-
-        // Execute tasks one by one
-        for (let i = 0; i < tasks.length; i++) {
-          const task = tasks[i];
-          
-          // Update task status to running
-          setEditTasks(prev => prev.map((t, idx) => 
-            idx === i ? { ...t, status: 'running' } : t
-          ));
-          setWorkflowMessages(prev => prev.map((m, idx) => {
-            if (m.type === 'task' && m.content === task.name) {
-              return { ...m, taskStatus: 'running' };
-            }
-            return m;
-          }));
-
-          try {
-            // For demo, we'll simulate task execution
-            // In real implementation, this would call the backend
-            await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 1000));
-            
-            // Update task status to completed
-            setEditTasks(prev => prev.map((t, idx) => 
-              idx === i ? { ...t, status: 'completed', result: 'Task completed successfully' } : t
-            ));
-            setWorkflowMessages(prev => prev.map((m) => {
-              if (m.type === 'task' && m.content === task.name) {
-                return { ...m, taskStatus: 'completed' };
-              }
-              return m;
-            }));
-          } catch (taskError: any) {
-            setEditTasks(prev => prev.map((t, idx) => 
-              idx === i ? { ...t, status: 'failed', error: taskError.message } : t
-            ));
-            setWorkflowMessages(prev => prev.map((m) => {
-              if (m.type === 'task' && m.content === task.name) {
-                return { ...m, taskStatus: 'failed' };
-              }
-              return m;
-            }));
+      // Get media metadata if not already set
+      let metadata = mediaMetadata;
+      if (!metadata) {
+        try {
+          const mediaResponse = await mediaApi.getById(uploadedMediaId);
+          if (mediaResponse.data.success && mediaResponse.data.data) {
+            const mediaData = mediaResponse.data.data;
+            metadata = {
+              duration: mediaData.duration || 60,
+              hasAudio: true,
+              width: mediaData.width,
+              height: mediaData.height,
+            };
+            setMediaMetadata(metadata);
           }
+        } catch (e) {
+          metadata = { duration: 60, hasAudio: true };
+          setMediaMetadata(metadata);
         }
+      }
 
-        setIsExecuting(false);
+      // Call orchestration API with autoExecute=false to get plan only
+      const response = await aiApi.orchestrateEdit(
+        userRequest,
+        uploadedMediaId,
+        metadata!,
+        false // autoExecute = false, wait for confirmation
+      );
+
+      if (response.data.success) {
+        const { parsedRequest, plan } = response.data.data;
+        const instructions = plan?.instructions || [];
+        const planId = plan?.id || '';
+
+        // Clear status message
+        setWorkflowMessages(prev => prev.filter(m => m.type !== 'status'));
+
+        // Show AI understanding of the request
         setWorkflowMessages(prev => [
           ...prev,
-          { type: 'assistant', content: 'All tasks completed! You can continue editing or give me another request.' },
+          {
+            type: 'assistant',
+            content: `📋 **Task Analysis**\n\n**Intent:** ${parsedRequest?.intent || 'video edit'}\n**Confidence:** ${Math.round((parsedRequest?.confidence || 0) * 100)}%\n**Tool:** 🎬 FFmpeg (video processing)\n\n**Planned Steps:**`
+          },
         ]);
 
+        // Update plan state
+        setEditPlan({
+          planId: planId,
+          operations: instructions.map((inst: any) => ({
+            type: inst.type,
+            description: inst.description,
+            parameters: inst.params,
+          })),
+          summary: `${parsedRequest?.intent || 'Video edit'} - ${instructions.length} steps`,
+        });
+
+        // Add task items with tool indicator
+        if (instructions.length > 0) {
+          instructions.forEach((inst: any, idx: number) => {
+            setWorkflowMessages(prev => [
+              ...prev,
+              {
+                type: 'task',
+                content: `${idx + 1}. [FFmpeg] ${inst.description || inst.type}`,
+                taskStatus: 'pending'
+              },
+            ]);
+          });
+        }
+
+        // Set pending plan for confirmation
+        setPendingPlanId(planId);
+        setIsPlanning(false);
+        setOrchestrationStatus('awaiting_confirmation');
+
+        // Show confirmation prompt
+        setWorkflowMessages(prev => [
+          ...prev,
+          {
+            type: 'assistant',
+            content: '⏳ **Waiting for confirmation...**\n\nPlease review the plan above. Click **Confirm** to execute or **Cancel** to abort.'
+          },
+        ]);
       } else {
-        throw new Error(response.data.error || 'Failed to plan tasks');
+        throw new Error(response.data.error || 'Failed to process video editing request');
       }
     } catch (error: any) {
-      console.error('AI planning error:', error);
+      console.error('Video edit orchestration error:', error);
+      setOrchestrationStatus('error');
       setWorkflowMessages(prev => [
         ...prev.filter(m => m.type !== 'status'),
-        { type: 'assistant', content: `Sorry, I encountered an error: ${error.message || 'Unknown error'}. Please try again.` },
+        {
+          type: 'assistant',
+          content: `❌ **Error:** ${error.message || 'Failed to process your request'}\n\nTry rephrasing your request or use simpler commands like:\n• "Cut the first 5 seconds"\n• "Speed up 2x"\n• "Add blur effect"\n• "Trim from 10 to 30 seconds"`
+        },
       ]);
     } finally {
       setIsPlanning(false);
     }
+  };
+
+  // Confirm and execute the pending plan
+  const handleConfirmPlan = async () => {
+    if (!pendingPlanId || isExecuting) return;
+
+    setOrchestrationStatus('executing');
+    setIsExecuting(true);
+
+    // Remove confirmation message and update status
+    setWorkflowMessages(prev => [
+      ...prev.filter(m => !m.content.includes('Waiting for confirmation')),
+      { type: 'status', content: '🚀 Executing video edit tasks...' },
+    ]);
+
+    try {
+      const response = await aiApi.executePlan(pendingPlanId);
+
+      if (response.data.success) {
+        const executionResult = response.data.data;
+        const instructions = editPlan?.operations || [];
+        const totalSteps = executionResult.totalSteps || instructions.length;
+        const executedSteps = executionResult.executedSteps || totalSteps;
+
+        // Clear status message
+        setWorkflowMessages(prev => prev.filter(m => m.type !== 'status'));
+
+        // Show FFmpeg command
+        if (executionResult.ffmpegCommand) {
+          setFfmpegCommand(executionResult.ffmpegCommand);
+          setWorkflowMessages(prev => [
+            ...prev,
+            {
+              type: 'assistant',
+              content: `🔧 **Executing FFmpeg Command:**\n\`\`\`bash\n${executionResult.ffmpegCommand}\n\`\`\``
+            },
+          ]);
+        }
+
+        // Update task statuses progressively
+        for (let idx = 0; idx < Math.min(executedSteps, instructions.length); idx++) {
+          setTimeout(() => {
+            setWorkflowMessages(prev => prev.map((m) => {
+              if (m.type === 'task' && m.content.includes(`${idx + 1}.`)) {
+                return { ...m, taskStatus: 'completed' };
+              }
+              return m;
+            }));
+            setOrchestrationProgress(Math.round(((idx + 1) / totalSteps) * 100));
+          }, (idx + 1) * 300);
+        }
+
+        // Check execution result
+        if (executionResult.success && executionResult.outputPath) {
+          const filename = executionResult.outputPath.split(/[/\\]/).pop() || 'edited-video.mp4';
+          setOutputVideoFilename(filename);
+          const downloadUrl = executionResult.downloadUrl || downloadEditedVideo(filename);
+          setOutputVideoUrl(downloadUrl);
+
+          setTimeout(() => {
+            setOrchestrationStatus('completed');
+            setOrchestrationProgress(100);
+            setIsExecuting(false);
+            setPendingPlanId(null);
+            setWorkflowMessages(prev => [
+              ...prev,
+              {
+                type: 'assistant',
+                content: `✅ **Video editing completed!**\n\nYour edited video is ready for download.\n📁 Output: \`${filename}\`\n\nYou can continue with more editing requests or download your video.`
+              },
+            ]);
+          }, Math.min(executedSteps, instructions.length) * 300 + 500);
+        } else if (!executionResult.success) {
+          setOrchestrationStatus('error');
+          setIsExecuting(false);
+          setPendingPlanId(null);
+          setWorkflowMessages(prev => [
+            ...prev,
+            {
+              type: 'assistant',
+              content: `❌ **Processing failed:** ${executionResult.error || 'Unknown error'}\n\nPlease try a different request or check your video file.`
+            },
+          ]);
+        }
+      } else {
+        throw new Error(response.data.error || 'Failed to execute plan');
+      }
+    } catch (error: any) {
+      console.error('Plan execution error:', error);
+      setOrchestrationStatus('error');
+      setIsExecuting(false);
+      setPendingPlanId(null);
+      setWorkflowMessages(prev => [
+        ...prev.filter(m => m.type !== 'status'),
+        {
+          type: 'assistant',
+          content: `❌ **Execution failed:** ${error.message || 'Failed to execute plan'}`
+        },
+      ]);
+    }
+  };
+
+  // Cancel the pending plan
+  const handleCancelPlan = () => {
+    setPendingPlanId(null);
+    setOrchestrationStatus('idle');
+    setEditPlan(null);
+    setWorkflowMessages(prev => [
+      ...prev.filter(m => !m.content.includes('Waiting for confirmation')),
+      {
+        type: 'assistant',
+        content: '❌ **Plan cancelled.** You can enter a new request.'
+      },
+    ]);
   };
 
   const handleBackToHome = () => {
@@ -435,6 +681,168 @@ export default function HomePage() {
     setUploadProgress(0);
     setEditTasks([]);
     setAiInput('');
+    setOrchestrationStatus('idle');
+    setEditPlan(null);
+    setOrchestrationProgress(0);
+    setOutputVideoUrl(null);
+    setOutputVideoFilename(null);
+    setFfmpegCommand(null);
+    setPendingPlanId(null);
+  };
+
+  // Handle Translate & Dub workflow button click
+  const handleTranslateDubClick = async () => {
+    if (!uploadedMediaId || transcriptionStatus !== 'completed') {
+      setWorkflowMessages(prev => [
+        ...prev,
+        { type: 'assistant', content: '⚠️ Please wait for the media to be uploaded and transcribed first.' },
+      ]);
+      return;
+    }
+
+    setOrchestrationStatus('planning');
+    setWorkflowMessages(prev => [
+      ...prev,
+      { type: 'user', content: 'Translate & dub this video' },
+      { type: 'status', content: 'Analyzing video and planning translation tasks...' },
+    ]);
+
+    try {
+      // Get media metadata if not already set
+      let metadata = mediaMetadata;
+      if (!metadata) {
+        try {
+          const mediaResponse = await mediaApi.getById(uploadedMediaId);
+          if (mediaResponse.data.success && mediaResponse.data.data) {
+            const mediaData = mediaResponse.data.data;
+            metadata = {
+              duration: mediaData.duration || 60,
+              hasAudio: true,
+              width: mediaData.width,
+              height: mediaData.height,
+            };
+            setMediaMetadata(metadata);
+          }
+        } catch (e) {
+          // Use default values
+          metadata = { duration: 60, hasAudio: true };
+          setMediaMetadata(metadata);
+        }
+      }
+
+      // Call orchestration API with translate request
+      const response = await aiApi.orchestrateEdit(
+        'Translate this video to Chinese with dubbed audio. Extract the transcript, translate it, and generate a new audio track.',
+        uploadedMediaId,
+        metadata!,
+        true // autoExecute
+      );
+
+      if (response.data.success) {
+        const { parsedRequest, plan, executionResult } = response.data.data;
+
+        // Update plan state - map backend structure to frontend
+        const instructions = plan?.instructions || [];
+        setEditPlan({
+          planId: plan?.id || '',
+          operations: instructions.map((inst: any) => ({
+            type: inst.type,
+            description: inst.description,
+            parameters: inst.params,
+          })),
+          summary: `${parsedRequest?.intent || 'Video edit'} workflow - ${instructions.length} steps`,
+        });
+
+        // Clear status message
+        setWorkflowMessages(prev => prev.filter(m => m.type !== 'status'));
+
+        // Show plan summary
+        setWorkflowMessages(prev => [
+          ...prev,
+          { type: 'assistant', content: `📋 **Edit Plan Created**\n\nIntent: ${parsedRequest?.intent || 'video edit'}\nConfidence: ${Math.round((parsedRequest?.confidence || 0) * 100)}%\nSteps: ${instructions.length}` },
+        ]);
+
+        // Add task items to display
+        if (instructions.length > 0) {
+          instructions.forEach((inst: any, idx: number) => {
+            setWorkflowMessages(prev => [
+              ...prev,
+              { type: 'task', content: `${idx + 1}. ${inst.description || inst.type}`, taskStatus: 'pending' },
+            ]);
+          });
+        }
+
+        setOrchestrationStatus('executing');
+
+        // If auto-execute is enabled, show execution results
+        if (executionResult) {
+          const totalSteps = executionResult.totalSteps || instructions.length;
+          const executedSteps = executionResult.executedSteps || 0;
+
+          // Capture FFmpeg command for display
+          if (executionResult.ffmpegCommand) {
+            setFfmpegCommand(executionResult.ffmpegCommand);
+            setWorkflowMessages(prev => [
+              ...prev,
+              { type: 'assistant', content: `🔧 **FFmpeg Command:**\n\`\`\`bash\n${executionResult.ffmpegCommand}\n\`\`\`` },
+            ]);
+          }
+
+          // Update task statuses progressively
+          for (let idx = 0; idx < Math.min(executedSteps, instructions.length); idx++) {
+            const inst = instructions[idx];
+            setTimeout(() => {
+              setWorkflowMessages(prev => prev.map((m) => {
+                if (m.type === 'task' && m.content.startsWith(`${idx + 1}.`)) {
+                  return { ...m, taskStatus: 'completed' };
+                }
+                return m;
+              }));
+              setOrchestrationProgress(Math.round(((idx + 1) / totalSteps) * 100));
+            }, (idx + 1) * 500);
+          }
+
+          // Check execution result
+          if (executionResult.success && executionResult.outputPath) {
+            const filename = executionResult.outputPath.split(/[/\\]/).pop() || 'edited-video.mp4';
+            setOutputVideoFilename(filename);
+            // Use downloadUrl if available, otherwise construct from outputPath
+            const downloadUrl = executionResult.downloadUrl || downloadEditedVideo(filename);
+            setOutputVideoUrl(downloadUrl);
+
+            setTimeout(() => {
+              setOrchestrationStatus('completed');
+              setOrchestrationProgress(100);
+              setWorkflowMessages(prev => [
+                ...prev,
+                { type: 'assistant', content: `✅ **Video processing completed!**\n\nYour edited video is ready for download.\nOutput: ${filename}` },
+              ]);
+            }, Math.min(executedSteps, instructions.length) * 500 + 500);
+          } else if (!executionResult.success) {
+            setOrchestrationStatus('error');
+            setWorkflowMessages(prev => [
+              ...prev,
+              { type: 'assistant', content: `❌ **Processing failed**: ${executionResult.error || 'Unknown error'}` },
+            ]);
+          }
+        } else {
+          // No execution result yet - plan was created but not executed
+          setWorkflowMessages(prev => [
+            ...prev,
+            { type: 'assistant', content: '⏳ Plan created. Waiting for execution...' },
+          ]);
+        }
+      } else {
+        throw new Error(response.data.error || 'Failed to create edit plan');
+      }
+    } catch (error: any) {
+      console.error('Orchestration error:', error);
+      setOrchestrationStatus('error');
+      setWorkflowMessages(prev => [
+        ...prev.filter(m => m.type !== 'status'),
+        { type: 'assistant', content: `❌ Error: ${error.message || 'Failed to process video'}. Please try again.` },
+      ]);
+    }
   };
 
   // 格式化文件名（超长时截断）
@@ -485,11 +893,30 @@ export default function HomePage() {
     },
   ];
 
-  const recentProjects = [
-    { id: '1', name: 'Product Demo Video', updatedAt: '2 hours ago' },
-    { id: '2', name: 'Team Meeting Recording', updatedAt: 'Yesterday' },
-    { id: '3', name: 'Tutorial Series Ep.1', updatedAt: '3 days ago' },
-  ];
+  // Format relative time
+  const formatRelativeTime = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins} minutes ago`;
+    if (diffHours < 24) return `${diffHours} hours ago`;
+    if (diffDays === 1) return 'Yesterday';
+    if (diffDays < 7) return `${diffDays} days ago`;
+    return date.toLocaleDateString();
+  };
+
+  // 自动上传和转录：只要进入工作流且有 translateFile 且未处理，自动触发
+  useEffect(() => {
+    if (showTranslateWorkflow && translateFile && transcriptionStatus === 'idle' && !isProcessingMedia) {
+      handleStartProcessing();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showTranslateWorkflow, translateFile]);
 
   // Translate & Dub Workflow View
   if (showTranslateWorkflow) {
@@ -564,12 +991,42 @@ export default function HomePage() {
               </h1>
 
               {/* Translate & dub option */}
-              <button className="w-full max-w-xl flex items-center justify-between px-6 py-4 bg-gray-100 rounded-xl mb-8 hover:bg-gray-200 transition">
+              <button
+                onClick={handleTranslateDubClick}
+                disabled={transcriptionStatus !== 'completed' || orchestrationStatus === 'planning' || orchestrationStatus === 'executing' || orchestrationStatus === 'awaiting_confirmation'}
+                className={`w-full max-w-xl flex items-center justify-between px-6 py-4 rounded-xl mb-8 transition ${
+                  transcriptionStatus === 'completed' && orchestrationStatus === 'idle'
+                    ? 'bg-purple-100 hover:bg-purple-200 border-2 border-purple-300'
+                    : orchestrationStatus === 'completed'
+                    ? 'bg-green-100 border-2 border-green-300'
+                    : orchestrationStatus === 'awaiting_confirmation'
+                    ? 'bg-yellow-100 border-2 border-yellow-300'
+                    : 'bg-gray-100 hover:bg-gray-200'
+                } ${transcriptionStatus !== 'completed' ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
                 <div className="flex items-center gap-3">
-                  <Languages className="w-5 h-5 text-gray-600" />
-                  <span className="text-gray-700 font-medium">Translate & dub video</span>
+                  {orchestrationStatus === 'planning' || orchestrationStatus === 'executing' ? (
+                    <Loader2 className="w-5 h-5 text-purple-600 animate-spin" />
+                  ) : orchestrationStatus === 'completed' ? (
+                    <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  ) : orchestrationStatus === 'awaiting_confirmation' ? (
+                    <span className="text-lg">⏳</span>
+                  ) : (
+                    <Languages className="w-5 h-5 text-gray-600" />
+                  )}
+                  <span className={`font-medium ${orchestrationStatus === 'completed' ? 'text-green-700' : orchestrationStatus === 'awaiting_confirmation' ? 'text-yellow-700' : 'text-gray-700'}`}>
+                    {orchestrationStatus === 'planning' ? 'Planning tasks...' :
+                     orchestrationStatus === 'executing' ? `Executing... ${orchestrationProgress}%` :
+                     orchestrationStatus === 'completed' ? 'Translation completed!' :
+                     orchestrationStatus === 'awaiting_confirmation' ? 'Waiting for confirmation...' :
+                     'Translate & dub video'}
+                  </span>
                 </div>
-                <span className="text-gray-400">›</span>
+                <span className="text-gray-400">
+                  {transcriptionStatus !== 'completed' ? '🔒' : '›'}
+                </span>
               </button>
 
               {/* Hidden file input - always rendered to maintain ref */}
@@ -633,7 +1090,24 @@ export default function HomePage() {
                               <span className="text-lg">🤖</span>
                             </div>
                             <div className="bg-gray-100 px-4 py-2 rounded-xl rounded-bl-sm max-w-[80%]">
-                              <p className="text-sm text-gray-700 whitespace-pre-wrap">{msg.content}</p>
+                              {msg.content.includes('```') ? (
+                                // Render code blocks specially
+                                <div className="text-sm text-gray-700">
+                                  {msg.content.split(/(```[\s\S]*?```)/g).map((part, i) => {
+                                    if (part.startsWith('```')) {
+                                      const codeContent = part.replace(/```\w*\n?/, '').replace(/```$/, '');
+                                      return (
+                                        <pre key={i} className="bg-gray-800 text-green-400 p-3 rounded-lg my-2 overflow-x-auto text-xs font-mono">
+                                          <code>{codeContent.trim()}</code>
+                                        </pre>
+                                      );
+                                    }
+                                    return <span key={i} className="whitespace-pre-wrap">{part}</span>;
+                                  })}
+                                </div>
+                              ) : (
+                                <p className="text-sm text-gray-700 whitespace-pre-wrap">{msg.content}</p>
+                              )}
                             </div>
                           </div>
                         )}
@@ -668,7 +1142,62 @@ export default function HomePage() {
                         )}
                       </div>
                     ))}
+
+                    {/* Confirm/Cancel buttons when awaiting confirmation */}
+                    {orchestrationStatus === 'awaiting_confirmation' && pendingPlanId && (
+                      <div className="flex items-center gap-3 py-3 px-4 bg-purple-50 border border-purple-200 rounded-lg">
+                        <button
+                          onClick={handleConfirmPlan}
+                          disabled={isExecuting}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          Confirm & Execute
+                        </button>
+                        <button
+                          onClick={handleCancelPlan}
+                          disabled={isExecuting}
+                          className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-300 disabled:bg-gray-100 transition"
+                        >
+                          <X className="w-4 h-4" />
+                          Cancel
+                        </button>
+                        <span className="text-xs text-purple-600 ml-auto">Review the plan above before executing</span>
+                      </div>
+                    )}
                   </div>
+
+                  {/* Download Card - Show when orchestration is completed */}
+                  {orchestrationStatus === 'completed' && outputVideoUrl && (
+                    <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-xl">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                          <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-green-800">Video Ready!</p>
+                          <p className="text-sm text-green-600">{outputVideoFilename}</p>
+                        </div>
+                      </div>
+                      <a
+                        href={outputVideoUrl}
+                        download={outputVideoFilename || 'edited-video.mp4'}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition font-medium"
+                      >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                        Download Edited Video
+                      </a>
+                      <p className="text-xs text-green-600 mt-2 text-center">
+                        Or copy link: <code className="bg-green-100 px-1 rounded">{outputVideoUrl}</code>
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -819,6 +1348,87 @@ export default function HomePage() {
                         <Upload className="w-4 h-4" />
                         Start Processing
                       </button>
+                    )}
+
+                    {/* Video Edit Progress */}
+                    {(orchestrationStatus === 'planning' || orchestrationStatus === 'executing') && (
+                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-200">
+                        <div className="relative">
+                          <svg className="w-8 h-8 -rotate-90">
+                            <circle cx="16" cy="16" r="14" fill="none" stroke="#e5e7eb" strokeWidth="2" />
+                            <circle
+                              cx="16" cy="16" r="14" fill="none"
+                              stroke="#8b5cf6"
+                              strokeWidth="2"
+                              strokeDasharray={`${orchestrationProgress * 0.88} 88`}
+                            />
+                          </svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-gray-700">
+                            {orchestrationStatus === 'planning' ? 'Planning edit tasks...' : 'Executing video edit...'}
+                          </p>
+                          <p className="text-xs text-gray-400">FFmpeg processing</p>
+                        </div>
+                        <span className="text-xs text-gray-500">{orchestrationProgress}%</span>
+                      </div>
+                    )}
+
+                    {/* Awaiting Confirmation Status */}
+                    {orchestrationStatus === 'awaiting_confirmation' && (
+                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-200">
+                        <div className="w-8 h-8 rounded-full bg-yellow-100 flex items-center justify-center">
+                          <span className="text-lg">⏳</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-yellow-700 font-medium">Awaiting confirmation</p>
+                          <p className="text-xs text-gray-400">Review plan before executing</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Edit Completed with Download */}
+                    {orchestrationStatus === 'completed' && outputVideoUrl && (
+                      <div className="mt-3 pt-3 border-t border-gray-200">
+                        <div className="flex items-center gap-3 mb-2">
+                          <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center">
+                            <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-green-700 font-medium">Edit complete!</p>
+                            <p className="text-xs text-gray-400 truncate">{outputVideoFilename}</p>
+                          </div>
+                        </div>
+                        <a
+                          href={outputVideoUrl}
+                          download={outputVideoFilename || 'edited-video.mp4'}
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 transition"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                          Download
+                        </a>
+                        {/* FFmpeg Command Display */}
+                        {ffmpegCommand && (
+                          <div className="mt-3">
+                            <p className="text-xs text-gray-500 mb-1">FFmpeg Command:</p>
+                            <div className="bg-gray-800 text-green-400 p-2 rounded text-[10px] font-mono overflow-x-auto max-h-20 overflow-y-auto">
+                              {ffmpegCommand}
+                            </div>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(ffmpegCommand);
+                              }}
+                              className="mt-1 text-xs text-purple-600 hover:text-purple-700"
+                            >
+                              Copy command
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
@@ -1100,9 +1710,10 @@ export default function HomePage() {
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >
-                {/* Hidden file input */}
+                {/* Hidden file input with id for label association */}
                 <input
                   ref={fileInputRef}
+                  id="main-file-upload"
                   type="file"
                   accept="video/*,audio/*"
                   onChange={(e) => handleFileSelect(e.target.files)}
@@ -1118,19 +1729,40 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Selected File Tag */}
-                {selectedFile && (
+                {/* Validating File Status */}
+                {isValidatingFile && (
                   <div className="px-4 pt-4">
-                    <div className="inline-flex items-center gap-2 px-3 py-2 bg-gray-100 rounded-lg border border-gray-200">
-                      <Video className="w-4 h-4 text-gray-500" />
+                    <div className="inline-flex items-center gap-2 px-3 py-2 bg-purple-50 rounded-lg border border-purple-200">
+                      <Loader2 className="w-4 h-4 text-purple-500 animate-spin" />
+                      <span className="text-sm text-purple-700">正在验证文件...</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Selected File Tag */}
+                {selectedFile && !isValidatingFile && (
+                  <div className="px-4 pt-4">
+                    <div className="inline-flex items-center gap-2 px-3 py-2 bg-green-50 rounded-lg border border-green-200">
+                      {fileMediaInfo?.type === 'video' ? (
+                        <Video className="w-4 h-4 text-green-600" />
+                      ) : (
+                        <Mic className="w-4 h-4 text-green-600" />
+                      )}
                       <span className="text-sm text-gray-700">{formatFileName(selectedFile.name)}</span>
                       <span className="text-xs text-gray-400">
                         ({(selectedFile.size / 1024 / 1024).toFixed(1)} MB)
                       </span>
-                      
-                      <button 
+                      {fileMediaInfo && (
+                        <span className="text-xs text-green-600">
+                          ✓ {fileMediaInfo.type === 'video' ? '视频' : '音频'}
+                          {fileMediaInfo.duration ? ` · ${Math.round(fileMediaInfo.duration)}秒` : ''}
+                          {fileMediaInfo.width && fileMediaInfo.height ? ` · ${fileMediaInfo.width}×${fileMediaInfo.height}` : ''}
+                        </span>
+                      )}
+
+                      <button
                         onClick={handleRemoveFile}
-                        className="p-0.5 hover:bg-gray-200 rounded transition ml-1"
+                        className="p-0.5 hover:bg-green-100 rounded transition ml-1"
                       >
                         <X className="w-3.5 h-3.5 text-gray-400 hover:text-gray-600" />
                       </button>
@@ -1138,22 +1770,36 @@ export default function HomePage() {
                   </div>
                 )}
 
+                {/* Upload prompt when no file selected and not validating */}
+                {!selectedFile && !isValidatingFile && (
+                  <label 
+                    htmlFor="main-file-upload"
+                    className="block px-4 pt-4 pb-2 cursor-pointer"
+                  >
+                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-purple-400 hover:bg-purple-50/50 transition">
+                      <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-sm text-gray-600">点击或拖拽视频/音频文件到这里</p>
+                      <p className="text-xs text-gray-400 mt-1">支持 MP4, MOV, AVI, MP3, WAV 等格式</p>
+                    </div>
+                  </label>
+                )}
+
                 <textarea
-                  placeholder="Upload a file or describe what you want to make, and I'll help you plan it."
+                  placeholder={selectedFile ? "描述你想对视频做的编辑..." : "或者描述你想制作的内容，AI 会帮你规划"}
                   value={promptText}
                   onChange={(e) => setPromptText(e.target.value)}
-                  className={`w-full px-4 pb-2 resize-none text-gray-700 placeholder-gray-400 focus:outline-none text-sm ${selectedFile ? 'pt-3' : 'pt-4'}`}
+                  className={`w-full px-4 pb-2 resize-none text-gray-700 placeholder-gray-400 focus:outline-none text-sm ${selectedFile ? 'pt-3' : 'pt-2'}`}
                   rows={2}
                 />
                 <div className="flex items-center justify-between px-4 pb-4">
                   <div className="flex items-center gap-1">
-                    <button 
-                      onClick={handleUploadClick}
-                      className="p-2 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition"
+                    <label 
+                      htmlFor="main-file-upload"
+                      className="p-2 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition cursor-pointer"
                       title="上传视频或音频"
                     >
                       <Upload className="w-5 h-5" />
-                    </button>
+                    </label>
                     <button className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition">
                       <Settings className="w-5 h-5" />
                     </button>
@@ -1206,40 +1852,78 @@ export default function HomePage() {
               </div>
             </section>
 
-            {/* Recent Projects */}
+            {/* Recent Media / Projects */}
             <section>
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-gray-900">Recent projects</h2>
-                <button className="text-sm text-purple-600 hover:underline">View all</button>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  {mediaList.length > 0 ? 'Uploaded Media' : 'Recent projects'}
+                </h2>
+                {mediaList.length > 0 && (
+                  <span className="text-sm text-gray-500">{mediaList.length} files</span>
+                )}
               </div>
-              <div className="grid grid-cols-4 gap-4">
-                {recentProjects.map((project) => (
-                  <Link
-                    key={project.id}
-                    href={`/editor/${project.id}`}
-                    className="bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition group"
+
+              {isLoadingMedia ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-8 h-8 text-purple-500 animate-spin" />
+                  <span className="ml-3 text-gray-500">Loading media...</span>
+                </div>
+              ) : mediaList.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+                  <Video className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                  <p className="text-gray-500 mb-2">No media uploaded yet</p>
+                  <p className="text-sm text-gray-400">Upload a video or audio file to get started</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-4 gap-4">
+                  {mediaList.slice(0, 7).map((media) => (
+                    <Link
+                      key={media.id}
+                      href={`/editor/${media.id}`}
+                      className="bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition group"
+                    >
+                      {/* Thumbnail */}
+                      <div className="aspect-video bg-gray-100 flex items-center justify-center relative">
+                        {media.thumbnailPath ? (
+                          <img
+                            src={getUploadUrl(media.thumbnailPath)}
+                            alt={media.originalName}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <Video className="w-8 h-8 text-gray-300" />
+                        )}
+                        {media.duration && (
+                          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 bg-black/70 text-white text-xs rounded">
+                            {Math.floor(media.duration / 60)}:{String(Math.floor(media.duration % 60)).padStart(2, '0')}
+                          </span>
+                        )}
+                      </div>
+                      {/* Info */}
+                      <div className="p-3">
+                        <h3 className="font-medium text-gray-900 text-sm truncate" title={media.originalName}>
+                          {media.originalName}
+                        </h3>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatRelativeTime(media.createdAt)}
+                          {media.width && media.height && (
+                            <span className="ml-2">{media.width}x{media.height}</span>
+                          )}
+                        </p>
+                      </div>
+                    </Link>
+                  ))}
+
+                  {/* New Project Card */}
+                  <button
+                    onClick={handleNewProject}
+                    className="bg-white rounded-xl border-2 border-dashed border-gray-200 overflow-hidden hover:border-purple-400 hover:bg-purple-50 transition group flex flex-col items-center justify-center aspect-[4/3]"
                   >
-                    {/* Thumbnail */}
-                    <div className="aspect-video bg-gray-100 flex items-center justify-center">
-                      <Video className="w-8 h-8 text-gray-300" />
-                    </div>
-                    {/* Info */}
-                    <div className="p-3">
-                      <h3 className="font-medium text-gray-900 text-sm truncate">{project.name}</h3>
-                      <p className="text-xs text-gray-500 mt-1">{project.updatedAt}</p>
-                    </div>
-                  </Link>
-                ))}
-                
-                {/* New Project Card */}
-                <button
-                  onClick={handleNewProject}
-                  className="bg-white rounded-xl border-2 border-dashed border-gray-200 overflow-hidden hover:border-purple-400 hover:bg-purple-50 transition group flex flex-col items-center justify-center aspect-[4/3]"
-                >
-                  <Plus className="w-8 h-8 text-gray-400 group-hover:text-purple-600 transition" />
-                  <span className="text-sm text-gray-500 group-hover:text-purple-600 mt-2 transition">New Project</span>
-                </button>
-              </div>
+                    <Plus className="w-8 h-8 text-gray-400 group-hover:text-purple-600 transition" />
+                    <span className="text-sm text-gray-500 group-hover:text-purple-600 mt-2 transition">New Project</span>
+                  </button>
+                </div>
+              )}
             </section>
           </div>
         </main>

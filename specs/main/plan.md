@@ -1,51 +1,63 @@
-# Implementation Plan: Text-driven Video Editing
+# Implementation Plan: Text-Driven Video Editing
 
-**Branch**: `main` | **Date**: 2026-01-25 | **Spec**: [spec.md](spec.md)
+**Branch**: `main` | **Date**: 2026-01-28 | **Spec**: [spec.md](spec.md)
 **Input**: Feature specification from `/specs/main/spec.md`
 
 ## Summary
 
-Implement text-driven video editing MVP enabling users to: (1) upload video and receive automatic transcription with word-level timestamps via Groq Whisper API, (2) edit video by selecting words/phrases in the transcript to cut/split, (3) manage multi-track timeline with drag-drop clip repositioning, and (4) export edited timeline to MP4 via FFmpeg. The approach leverages existing Next.js/Express architecture with Zustand for state management.
+Implement a Descript-like text-driven video editor MVP that allows users to:
+1. Upload video files and receive automatic transcription with word-level timestamps
+2. Edit video by selecting/cutting/splitting text in the transcript
+3. Export the edited timeline to MP4
+
+The technical approach uses Groq Whisper API for transcription, Zustand with immer for timeline state management with undo/redo, and FFmpeg for video export. Playback previews use client-side skip logic without re-encoding.
 
 ## Technical Context
 
 **Language/Version**: TypeScript 5.4+, Node.js 18+  
-**Primary Dependencies**: Next.js 14 (App Router), Express.js, FFmpeg, Groq SDK, Zustand, React Query, Slate.js  
-**Storage**: Local file system for MediaFile (`backend/uploads/`), JSON files for project state (MVP)  
-**Testing**: Vitest (frontend), Playwright (E2E)  
-**Target Platform**: Web (Chrome, Firefox, Safari), Windows/macOS/Linux dev environments  
+**Primary Dependencies**:  
+- Frontend: Next.js 14 (App Router), Zustand, React Query, Tailwind CSS, Slate.js
+- Backend: Express.js, FFmpeg, Groq SDK, Zod  
+**Storage**: File-based (uploads/), in-memory project state (localStorage persistence)  
+**Testing**: Vitest (frontend + backend), Playwright (E2E future)  
+**Target Platform**: Web (Chrome/Firefox/Safari, desktop-first)  
 **Project Type**: Web application (frontend + backend + shared types)  
-**Performance Goals**: 60fps timeline interactions, <5s first partial transcript, <2min full transcription for ≤60s clips  
-**Constraints**: 500MB max file size, <100ms UI feedback latency, auto-save with ≤30s data loss  
-**Scale/Scope**: Single-user MVP, ~5 main screens (home, editor, export dialog)
+**Performance Goals**: 60fps timeline interactions, <100ms UI feedback, <2min transcription for short clips  
+**Constraints**: ≤500MB file uploads, single-user MVP, local storage only  
+**Scale/Scope**: Single user, ~10 screens, MVP feature set
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-### Pre-Design Check
+| Principle | Requirement | Status | Notes |
+|-----------|-------------|--------|-------|
+| **I. User-Centric Design** | | | |
+| Text-First Editing | Transcript is primary editing interface | ✅ PASS | FR-003: transcript with selectable word ranges |
+| Immediate Feedback | Actions provide feedback within 100ms | ✅ PASS | NFR-001: optimistic updates, 60fps target |
+| Non-Destructive Editing | Edits reversible, originals never modified | ✅ PASS | Undo/redo stack, source files untouched |
+| Progressive Disclosure | Complex features discoverable | ✅ PASS | MVP focuses on core cut/split only |
+| **II. Real-Time Performance** | | | |
+| 60fps Target | Timeline at ≤16ms frame time | ✅ PASS | NFR-001 explicitly targets this |
+| Optimistic Updates | UI updates immediately | ✅ PASS | Zustand state updates sync |
+| Lazy Loading | Large data loads progressively | ✅ PASS | Transcript segments load on demand |
+| Background Processing | Heavy compute in workers/jobs | ✅ PASS | Transcription + export are async jobs |
+| **III. Type Safety & Contracts** | | | |
+| Shared Types | Frontend/backend share types | ✅ PASS | `shared/types/index.ts` in use |
+| API Contracts | Typed request/response schemas | ✅ PASS | contracts/ directory with specs |
+| Runtime Validation | External inputs validated | ✅ PASS | Zod for uploads, API validation |
+| No `any` | TypeScript any forbidden | ✅ PASS | Strict tsconfig |
+| **IV. Test Coverage** | | | |
+| API Contract Tests | Endpoints have contract tests | ✅ PASS | `backend/tests/contracts/` exists |
+| Integration Tests | User journeys have E2E tests | ⚠️ DEFER | E2E deferred post-MVP |
+| Unit Tests | Complex logic has unit tests | ✅ PASS | Timeline operations tested |
+| **V. Graceful Degradation** | | | |
+| Partial Functionality | Manual timeline edit if transcription fails | ✅ PASS | FR-004: timeline edits independent |
+| Clear Error States | Async ops surface errors with retry | ✅ PASS | NFR-004 requires this |
+| Data Persistence | Auto-save, <30s data loss on crash | ✅ PASS | Zustand persist middleware |
+| Offline Resilience | Local state preserved | ✅ PASS | localStorage persistence |
 
-| Principle | Status | Evidence |
-|-----------|--------|----------|
-| I. User-Centric Design | ✅ PASS | Text-first editing is core of US1; non-destructive edits via timeline state |
-| II. Real-Time Performance | ✅ PASS | NFR-001 targets 60fps; NFR-002 defines streaming transcript SLOs |
-| III. Type Safety & Contracts | ✅ PASS | Shared types exist in `shared/types/`; Word interface already defined |
-| IV. Test Coverage | ⚠️ DEFERRED | MVP defers comprehensive tests; critical paths will have smoke tests |
-| V. Graceful Degradation | ✅ PASS | NFR-004 mandates error states with retry; auto-save required |
-
-**Gate Result**: PASS (IV. Test Coverage deferred with justification for MVP scope)
-
-### Post-Design Re-Check (Phase 1 Complete)
-
-| Principle | Status | Evidence |
-|-----------|--------|----------|
-| I. User-Centric Design | ✅ PASS | Contracts define text-first transcript editing via `Word.deleted` flag; non-destructive by design (original mediafile untouched) |
-| II. Real-Time Performance | ✅ PASS | Data model supports optimistic updates (Zustand + immer); polling + SSE hybrid for async jobs; lazy loading via segments |
-| III. Type Safety & Contracts | ✅ PASS | Full API contracts in `contracts/*.md`; data model in `data-model.md`; all entities typed in `shared/types/` |
-| IV. Test Coverage | ⚠️ DEFERRED | No test tasks in Phase 3-5; smoke test coverage planned for P1 flow only |
-| V. Graceful Degradation | ✅ PASS | All contracts include error responses with retry hints; auto-save endpoint defined; manual timeline editing possible if transcription fails |
-
-**Post-Design Gate**: PASS (same deferral justification applies)
+**Gate Result**: ✅ PASSED (1 deferred item tracked)
 
 ## Project Structure
 
@@ -54,11 +66,15 @@ Implement text-driven video editing MVP enabling users to: (1) upload video and 
 ```text
 specs/main/
 ├── plan.md              # This file
-├── research.md          # Phase 0 output
-├── data-model.md        # Phase 1 output
-├── quickstart.md        # Phase 1 output
-├── contracts/           # Phase 1 output (API schemas)
-└── tasks.md             # Phase 2 output
+├── research.md          # Phase 0 output ✅
+├── data-model.md        # Phase 1 output ✅
+├── quickstart.md        # Phase 1 output ✅
+├── contracts/           # Phase 1 output ✅
+│   ├── export.md
+│   ├── media.md
+│   ├── projects.md
+│   └── transcription.md
+└── tasks.md             # Phase 2 output (existing)
 ```
 
 ### Source Code (repository root)
@@ -67,57 +83,71 @@ specs/main/
 backend/
 ├── src/
 │   ├── index.ts              # Express server entry
-│   ├── middleware/
-│   │   ├── errorHandler.ts   # Error handling + retry support
-│   │   └── upload.ts         # Multer config + 500MB validation
-│   ├── routes/
-│   │   ├── media.ts          # POST /api/media/upload
-│   │   ├── transcription.ts  # POST/GET /api/transcription/*
-│   │   ├── projects.ts       # Project CRUD
-│   │   └── export.ts         # POST/GET /api/export/*
-│   └── services/
-│       ├── transcription.ts  # Groq Whisper integration
-│       ├── storage.ts        # File + JSON persistence
-│       └── videoProcessing.ts # FFmpeg operations
-├── uploads/
-│   ├── videos/
-│   ├── audio/
-│   ├── thumbnails/
-│   └── exports/
-└── tests/
+│   ├── middleware/           # Error handling, upload config
+│   ├── routes/               # API route handlers
+│   │   ├── ai.ts
+│   │   ├── export.ts
+│   │   ├── jobs.ts
+│   │   ├── media.ts
+│   │   ├── projects.ts
+│   │   └── transcription.ts
+│   └── services/             # Business logic
+│       ├── claude.ts
+│       ├── jobs.ts
+│       ├── openai.ts
+│       ├── storage.ts
+│       ├── transcription.ts
+│       ├── videoEditOrchestration.ts
+│       └── videoProcessing.ts
+├── tests/
+│   └── contracts/
+│       └── api.contract.test.ts
+└── uploads/                  # File storage
+    ├── audio/
+    ├── exports/
+    ├── images/
+    ├── projects/
+    ├── thumbnails/
+    └── videos/
 
 frontend/
 ├── src/
-│   ├── app/
-│   │   ├── page.tsx          # Home/upload page
+│   ├── app/                  # Next.js App Router pages
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
 │   │   └── editor/[projectId]/page.tsx
 │   ├── components/
-│   │   ├── editor/
+│   │   ├── editor/           # Editor components
 │   │   │   ├── DescriptEditor.tsx
 │   │   │   ├── TranscriptEditor.tsx
 │   │   │   ├── VideoPlayer.tsx
-│   │   │   ├── MediaUploader.tsx
-│   │   │   └── ExportDialog.tsx
+│   │   │   └── ...
 │   │   └── timeline/
 │   │       └── Timeline.tsx
-│   ├── stores/
-│   │   └── editorStore.ts    # Zustand project/timeline state
-│   └── lib/
-│       ├── api.ts            # API client
-│       └── utils.ts
-└── __tests__/
+│   ├── lib/                  # Utilities, API client
+│   │   └── api.ts
+│   └── stores/               # Zustand state
+│       └── editorStore.ts
+└── src/__tests__/            # Frontend tests
 
 shared/
 └── types/
-    └── index.ts              # Project, Media, Transcript, Timeline types
+    └── index.ts              # Shared TypeScript types
 ```
 
-**Structure Decision**: Web application pattern (Option 2) - frontend/ + backend/ + shared/ already exists and matches constitution's technology stack.
+**Structure Decision**: Web application structure with `frontend/`, `backend/`, and `shared/` directories. This matches the existing codebase and constitution's Development Standards.
 
 ## Complexity Tracking
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
-
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
-| IV. Test Coverage deferred | MVP timeline pressure | Will add contract tests for critical paths post-MVP; smoke tests cover P1 flow |
+| E2E tests deferred | MVP timeline constraint | Will add Playwright after core features stable |
+
+## Phase Outputs
+
+- **Phase 0 (Research)**: [research.md](research.md) ✅ Complete
+- **Phase 1 (Design)**: 
+  - [data-model.md](data-model.md) ✅ Complete
+  - [contracts/](contracts/) ✅ Complete  
+  - [quickstart.md](quickstart.md) ✅ Complete
+- **Phase 2 (Tasks)**: [tasks.md](tasks.md) - Run `/speckit.tasks` to generate

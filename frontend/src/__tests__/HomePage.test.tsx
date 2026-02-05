@@ -1,11 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import HomePage from '@/app/page';
+import { mediaApi } from '@/lib/api';
 
 // Mock the API module
 vi.mock('@/lib/api', () => ({
   mediaApi: {
     upload: vi.fn(),
+    getAll: vi.fn().mockResolvedValue({
+      data: {
+        success: true,
+        data: [],
+      },
+    }),
+    getById: vi.fn(),
+    validate: vi.fn(),
   },
   aiApi: {
     planTasks: vi.fn().mockResolvedValue({
@@ -20,7 +29,15 @@ vi.mock('@/lib/api', () => ({
         },
       },
     }),
+    orchestrateEdit: vi.fn(),
+    executePlan: vi.fn(),
   },
+  transcriptionApi: {
+    startJob: vi.fn(),
+    getJobStatus: vi.fn(),
+  },
+  downloadEditedVideo: vi.fn(() => '/api/export/download/edited.mp4'),
+  getUploadUrl: vi.fn((path: string) => path),
 }));
 
 describe('HomePage', () => {
@@ -82,7 +99,7 @@ describe('Translate & Dub Workflow', () => {
 
   it('has working back button in workflow', async () => {
     render(<HomePage />);
-    
+
     // Open workflow
     const translateButton = screen.getByText('Translate & dub video');
     fireEvent.click(translateButton);
@@ -100,5 +117,65 @@ describe('Translate & Dub Workflow', () => {
       // Look for the main page elements
       expect(screen.getByText('What can I help you with?')).toBeInTheDocument();
     }, { timeout: 2000 });
+  });
+});
+
+describe('HomePage - Uploaded Media Display', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('calls mediaApi.getAll on mount', async () => {
+    render(<HomePage />);
+    await waitFor(() => {
+      expect(mediaApi.getAll).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows "Uploaded Media" heading and file count when media exists', async () => {
+    (mediaApi.getAll as any).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: [
+          { id: 'vid-1', originalName: 'demo.mp4', filePath: '/uploads/videos/demo.mp4', createdAt: new Date().toISOString() },
+          { id: 'vid-2', originalName: 'sample.mp4', filePath: '/uploads/videos/sample.mp4', createdAt: new Date().toISOString() },
+        ],
+      },
+    });
+
+    render(<HomePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Uploaded Media')).toBeInTheDocument();
+    });
+    expect(screen.getByText('2 files')).toBeInTheDocument();
+  });
+
+  it('renders each media item originalName', async () => {
+    (mediaApi.getAll as any).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: [
+          { id: 'vid-1', originalName: 'vacation.mp4', filePath: '/uploads/videos/vacation.mp4', createdAt: new Date().toISOString() },
+          { id: 'vid-2', originalName: 'presentation.mp4', filePath: '/uploads/videos/presentation.mp4', createdAt: new Date().toISOString() },
+        ],
+      },
+    });
+
+    render(<HomePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('vacation.mp4')).toBeInTheDocument();
+    });
+    expect(screen.getByText('presentation.mp4')).toBeInTheDocument();
+  });
+
+  it('shows empty state when no media has been uploaded', async () => {
+    // Default mock already returns empty data array
+    render(<HomePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('No media uploaded yet')).toBeInTheDocument();
+    });
   });
 });

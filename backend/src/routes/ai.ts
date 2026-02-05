@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import {
-  chatWithClaude,
+  chatWithAI,
   removeFillerWords,
   generateSummary,
   generateShowNotes,
@@ -11,13 +11,27 @@ import {
   improveTranscript,
   planEditTasks,
   executeEditTask,
-  ClaudeMessage,
+  AIMessage,
   EditTask,
-} from '../services/claude';
+} from '../services/openai';
+import {
+  parseUserRequest,
+  generateEditPlan,
+  executeEditPlan,
+  getEditPlanStatus,
+  getAllEditPlans,
+  orchestrateVideoEdit,
+  MediaInfo,
+  undoLastEdit,
+  redoEdit,
+  getEditHistory,
+  clearEditHistory,
+} from '../services/videoEditOrchestration';
+import { getMediaById } from './media';
 
 const router = Router();
 
-// Chat with Claude
+// Chat with AI (OpenAI GPT-4)
 router.post('/chat', async (req: Request, res: Response) => {
   try {
     const { messages, systemPrompt } = req.body;
@@ -29,7 +43,7 @@ router.post('/chat', async (req: Request, res: Response) => {
       });
     }
 
-    const response = await chatWithClaude(messages as ClaudeMessage[], systemPrompt);
+    const response = await chatWithAI(messages as AIMessage[], systemPrompt);
 
     res.json({
       success: true,
@@ -38,7 +52,7 @@ router.post('/chat', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('Claude chat error:', error);
+    console.error('AI chat error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to get AI response',
@@ -306,6 +320,291 @@ router.post('/execute-workflow', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to execute workflow',
+    });
+  }
+});
+
+// ============ Video Edit Orchestration API ============
+
+/**
+ * POST /api/ai/orchestrate
+ * 提交视频编辑编排请求
+ */
+router.post('/orchestrate', async (req: Request, res: Response) => {
+  try {
+    const { userRequest, mediaId, mediaInfo, autoExecute } = req.body;
+
+    if (!userRequest || typeof userRequest !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'User request text is required',
+      });
+    }
+
+    if (!mediaId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Media ID is required',
+      });
+    }
+
+    if (!mediaInfo || typeof mediaInfo.duration !== 'number') {
+      return res.status(400).json({
+        success: false,
+        error: 'Media info with duration is required',
+      });
+    }
+
+    // Get actual file path from media store
+    const media = getMediaById(mediaId);
+    const filePath = media?.filePath || media?.filename;
+    console.log('[Orchestrate] Media lookup:', { mediaId, filePath, hasMedia: !!media });
+
+    const result = await orchestrateVideoEdit(
+      userRequest,
+      mediaId,
+      mediaInfo as MediaInfo,
+      autoExecute || false,
+      filePath  // Pass actual file path
+    );
+
+    res.json({
+      success: true,
+      data: {
+        parsedRequest: result.parsedRequest,
+        plan: result.plan,
+        executionResult: result.executionResult,
+      },
+    });
+  } catch (error: any) {
+    console.error('Orchestrate video edit error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to orchestrate video edit',
+    });
+  }
+});
+
+/**
+ * GET /api/ai/orchestrate/:planId/status
+ * 获取编辑计划状态
+ */
+router.get('/orchestrate/:planId/status', (req: Request, res: Response) => {
+  try {
+    const { planId } = req.params;
+
+    const plan = getEditPlanStatus(planId);
+
+    if (!plan) {
+      return res.status(404).json({
+        success: false,
+        error: `Edit plan not found: ${planId}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { plan },
+    });
+  } catch (error: any) {
+    console.error('Get plan status error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get plan status',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/orchestrate/:planId/execute
+ * 执行指定的编辑计划
+ */
+router.post('/orchestrate/:planId/execute', async (req: Request, res: Response) => {
+  try {
+    const { planId } = req.params;
+
+    const plan = getEditPlanStatus(planId);
+
+    if (!plan) {
+      return res.status(404).json({
+        success: false,
+        error: `Edit plan not found: ${planId}`,
+      });
+    }
+
+    if (plan.status === 'executing') {
+      return res.status(409).json({
+        success: false,
+        error: 'Plan is already being executed',
+      });
+    }
+
+    if (plan.status === 'completed') {
+      return res.status(409).json({
+        success: false,
+        error: 'Plan has already been completed',
+      });
+    }
+
+    const executionResult = await executeEditPlan(plan);
+
+    res.json({
+      success: executionResult.success,
+      data: {
+        outputPath: executionResult.outputPath,
+        executedSteps: executionResult.executedSteps,
+        totalSteps: executionResult.totalSteps,
+      },
+      error: executionResult.error,
+    });
+  } catch (error: any) {
+    console.error('Execute plan error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to execute plan',
+    });
+  }
+});
+
+/**
+ * GET /api/ai/orchestrate/plans
+ * 获取所有编辑计划
+ */
+router.get('/orchestrate/plans', (req: Request, res: Response) => {
+  try {
+    const plans = getAllEditPlans();
+
+    res.json({
+      success: true,
+      data: { plans },
+    });
+  } catch (error: any) {
+    console.error('Get all plans error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get plans',
+    });
+  }
+});
+
+// ============ Undo/Redo API ============
+
+/**
+ * POST /api/ai/orchestrate/:mediaId/undo
+ * 撤回上一步编辑操作
+ */
+router.post('/orchestrate/:mediaId/undo', async (req: Request, res: Response) => {
+  try {
+    const { mediaId } = req.params;
+
+    const result = await undoLastEdit(mediaId);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    const history = getEditHistory(mediaId);
+
+    res.json({
+      success: true,
+      data: {
+        restoredState: result.restoredState,
+        remainingUndoSteps: result.remainingUndoSteps,
+        canRedo: history.canRedo,
+      },
+    });
+  } catch (error: any) {
+    console.error('Undo edit error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to undo edit',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/orchestrate/:mediaId/redo
+ * 重做编辑操作
+ */
+router.post('/orchestrate/:mediaId/redo', async (req: Request, res: Response) => {
+  try {
+    const { mediaId } = req.params;
+
+    const result = await redoEdit(mediaId);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    const history = getEditHistory(mediaId);
+
+    res.json({
+      success: true,
+      data: {
+        restoredState: result.restoredState,
+        remainingRedoSteps: result.remainingRedoSteps,
+        canUndo: history.canUndo,
+      },
+    });
+  } catch (error: any) {
+    console.error('Redo edit error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to redo edit',
+    });
+  }
+});
+
+/**
+ * GET /api/ai/orchestrate/:mediaId/history
+ * 获取媒体的编辑历史
+ */
+router.get('/orchestrate/:mediaId/history', (req: Request, res: Response) => {
+  try {
+    const { mediaId } = req.params;
+
+    const history = getEditHistory(mediaId);
+
+    res.json({
+      success: true,
+      data: history,
+    });
+  } catch (error: any) {
+    console.error('Get history error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get history',
+    });
+  }
+});
+
+/**
+ * DELETE /api/ai/orchestrate/:mediaId/history
+ * 清空媒体的编辑历史
+ */
+router.delete('/orchestrate/:mediaId/history', (req: Request, res: Response) => {
+  try {
+    const { mediaId } = req.params;
+
+    const result = clearEditHistory(mediaId);
+
+    res.json({
+      success: true,
+      data: {
+        clearedCount: result.clearedCount,
+      },
+    });
+  } catch (error: any) {
+    console.error('Clear history error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to clear history',
     });
   }
 });

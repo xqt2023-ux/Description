@@ -8,8 +8,17 @@ import { bootstrap } from 'global-agent';
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
   process.env.GLOBAL_AGENT_HTTP_PROXY = process.env.HTTP_PROXY || process.env.HTTPS_PROXY;
   process.env.GLOBAL_AGENT_HTTPS_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+
+  // Set NO_PROXY for global-agent
+  if (process.env.NO_PROXY) {
+    process.env.GLOBAL_AGENT_NO_PROXY = process.env.NO_PROXY;
+  }
+
   bootstrap();
   console.log('🌐 Global proxy enabled:', process.env.GLOBAL_AGENT_HTTP_PROXY);
+  if (process.env.NO_PROXY) {
+    console.log('🚫 Proxy bypass list:', process.env.NO_PROXY);
+  }
 }
 
 import express from 'express';
@@ -66,7 +75,25 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false, // Disable to allow video thumbnails
 }));
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or Postman)
+    if (!origin) return callback(null, true);
+
+    // In development, allow all localhost origins
+    if (process.env.NODE_ENV !== 'production') {
+      if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+        return callback(null, true);
+      }
+    }
+
+    // In production, only allow configured frontend URL
+    const allowedOrigin = process.env.FRONTEND_URL || 'http://localhost:3000';
+    if (origin === allowedOrigin) {
+      return callback(null, true);
+    }
+
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(morgan('dev'));
