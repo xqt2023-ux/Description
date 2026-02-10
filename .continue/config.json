@@ -1,0 +1,11 @@
+{
+  "models": [
+    {
+      "title": "Claude (Proxy)",
+      "provider": "anthropic",
+      "apiBase": "https://api.babelark.com",
+      "apiKey": "sk-pKJ0ZXmgHhQCXT9m8PGVFVOeSLErfnA2ZMOWk52rnmqDw3bJ",
+      "model": "claude-sonnet-4.5-20250929"
+    }
+  ]
+}
