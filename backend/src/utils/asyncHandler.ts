@@ -1,0 +1,19 @@
+import { Request, Response, NextFunction } from 'express';
+
+/**
+ * Async handler wrapper to catch errors in async route handlers
+ * and pass them to the error handling middleware
+ *
+ * Usage:
+ * router.get('/path', asyncHandler(async (req, res) => {
+ *   const data = await someAsyncOperation();
+ *   res.json({ data });
+ * }));
+ */
+export const asyncHandler = (
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
+) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+};

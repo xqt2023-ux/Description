@@ -35,6 +35,7 @@ import { exportRoutes } from './routes/export';
 import { aiRoutes } from './routes/ai';
 import { jobRoutes } from './routes/jobs';
 import { verifyFFmpeg } from './services/videoProcessing';
+import { initializeTools } from './mcp-server/registry/initTools';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -43,6 +44,15 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
 // ============================================
 // Startup Verification (T001, T002, T003)
 // ============================================
+
+// Initialize MCP Tools Registry
+console.log('🔧 Initializing MCP Tools...');
+try {
+  initializeTools();
+  console.log('✓ MCP Tools initialized successfully');
+} catch (error) {
+  console.error('❌ Failed to initialize MCP tools:', (error as Error).message);
+}
 
 // T001: Verify FFmpeg is installed
 try {

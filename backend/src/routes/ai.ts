@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
+import { Errors } from '../middleware/errorHandler';
+import { asyncHandler } from '../utils/asyncHandler';
 import {
-  chatWithAI,
+  chatWithClaude as chatWithAI,
   removeFillerWords,
   generateSummary,
   generateShowNotes,
@@ -11,9 +13,12 @@ import {
   improveTranscript,
   planEditTasks,
   executeEditTask,
-  AIMessage,
+  ClaudeMessage,
   EditTask,
-} from '../services/openai';
+} from '../services/claude';
+
+// Type aliases for compatibility
+export type AIMessage = ClaudeMessage;
 import {
   parseUserRequest,
   generateEditPlan,
@@ -27,38 +32,36 @@ import {
   getEditHistory,
   clearEditHistory,
 } from '../services/videoEditOrchestration';
+import {
+  createInteractiveWorkflow,
+  executeWorkflowStep,
+  confirmStep,
+  skipStep,
+  undoStep,
+  cancelWorkflow,
+  getWorkflow,
+  getAllWorkflows,
+  deleteWorkflow,
+} from '../services/interactiveEditWorkflow';
 import { getMediaById } from './media';
 
 const router = Router();
 
 // Chat with AI (OpenAI GPT-4)
-router.post('/chat', async (req: Request, res: Response) => {
-  try {
-    const { messages, systemPrompt } = req.body;
+router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
+  const { messages, systemPrompt } = req.body;
 
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Messages array is required',
-      });
-    }
-
-    const response = await chatWithAI(messages as AIMessage[], systemPrompt);
-
-    res.json({
-      success: true,
-      data: {
-        response,
-      },
-    });
-  } catch (error: any) {
-    console.error('AI chat error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to get AI response',
-    });
+  if (!messages || !Array.isArray(messages)) {
+    throw Errors.validation('Messages array is required');
   }
-});
+
+  const response = await chatWithAI(messages as AIMessage[], systemPrompt);
+
+  res.json({
+    success: true,
+    data: { response },
+  });
+}));
 
 // Execute a specific skill
 router.post('/skills/:skillName', async (req: Request, res: Response) => {
@@ -101,7 +104,8 @@ router.post('/skills/:skillName', async (req: Request, res: Response) => {
         result = await translateTranscript(transcript, targetLanguage);
         break;
       case 'generate-chapters':
-        result = await generateChapters(transcript);
+        // Generate chapters from transcript text only (no segments available)
+        result = await generateChapters(transcript, []);
         break;
       case 'improve-transcript':
         result = await improveTranscript(transcript);
@@ -605,6 +609,358 @@ router.delete('/orchestrate/:mediaId/history', (req: Request, res: Response) => 
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to clear history',
+    });
+  }
+});
+
+// ============ Interactive Workflow API ============
+
+/**
+ * POST /api/ai/workflow/create
+ * 创建交互式编辑工作流
+ */
+router.post('/workflow/create', async (req: Request, res: Response) => {
+  try {
+    const { userRequest, mediaId, mediaInfo } = req.body;
+
+    if (!userRequest) {
+      return res.status(400).json({
+        success: false,
+        error: 'User request is required',
+      });
+    }
+
+    if (!mediaId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Media ID is required',
+      });
+    }
+
+    if (!mediaInfo || !mediaInfo.duration) {
+      return res.status(400).json({
+        success: false,
+        error: 'Media info with duration is required',
+      });
+    }
+
+    // Get source file path
+    const media = getMediaById(mediaId);
+    const sourceFilePath = media?.filePath || media?.filename;
+
+    if (!sourceFilePath) {
+      return res.status(404).json({
+        success: false,
+        error: `Media file not found: ${mediaId}`,
+      });
+    }
+
+    const result = await createInteractiveWorkflow(
+      userRequest,
+      mediaId,
+      sourceFilePath,
+      mediaInfo as MediaInfo
+    );
+
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    res.json({
+      success: true,
+      data: { workflow: result.workflow },
+    });
+  } catch (error: any) {
+    console.error('Create workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create workflow',
+    });
+  }
+});
+
+/**
+ * GET /api/ai/workflow/:workflowId
+ * 获取工作流状态
+ */
+router.get('/workflow/:workflowId', (req: Request, res: Response) => {
+  try {
+    const { workflowId } = req.params;
+    const workflow = getWorkflow(workflowId);
+
+    if (!workflow) {
+      return res.status(404).json({
+        success: false,
+        error: `Workflow not found: ${workflowId}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { workflow },
+    });
+  } catch (error: any) {
+    console.error('Get workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get workflow',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/workflow/:workflowId/step/:stepId/execute
+ * 执行工作流中的某个步骤
+ */
+router.post('/workflow/:workflowId/step/:stepId/execute', async (req: Request, res: Response) => {
+  try {
+    const { workflowId, stepId } = req.params;
+
+    const result = await executeWorkflowStep(workflowId, stepId);
+
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    // Return updated workflow
+    const workflow = getWorkflow(workflowId);
+
+    res.json({
+      success: true,
+      data: {
+        step: {
+          previewPath: result.previewPath,
+          previewUrl: result.previewUrl,
+          ffmpegCommand: result.ffmpegCommand,
+        },
+        workflow,
+      },
+    });
+  } catch (error: any) {
+    console.error('Execute step error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to execute step',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/workflow/:workflowId/step/:stepId/confirm
+ * 用户确认步骤结果
+ */
+router.post('/workflow/:workflowId/step/:stepId/confirm', async (req: Request, res: Response) => {
+  try {
+    const { workflowId, stepId } = req.params;
+    const { approved } = req.body;
+
+    if (typeof approved !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'approved (boolean) is required',
+      });
+    }
+
+    const result = await confirmStep(workflowId, stepId, approved);
+
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        workflow: result.workflow,
+        nextStepReady: result.nextStepReady,
+      },
+    });
+  } catch (error: any) {
+    console.error('Confirm step error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to confirm step',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/workflow/:workflowId/step/:stepId/skip
+ * 跳过当前步骤
+ */
+router.post('/workflow/:workflowId/step/:stepId/skip', async (req: Request, res: Response) => {
+  try {
+    const { workflowId, stepId } = req.params;
+
+    const result = await skipStep(workflowId, stepId);
+
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        workflow: result.workflow,
+        nextStepReady: result.nextStepReady,
+      },
+    });
+  } catch (error: any) {
+    console.error('Skip step error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to skip step',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/workflow/:workflowId/undo
+ * 回退到上一步
+ */
+router.post('/workflow/:workflowId/undo', async (req: Request, res: Response) => {
+  try {
+    const { workflowId } = req.params;
+
+    const result = await undoStep(workflowId);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        workflow: result.workflow,
+        nextStepReady: result.nextStepReady,
+      },
+    });
+  } catch (error: any) {
+    console.error('Undo step error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to undo step',
+    });
+  }
+});
+
+/**
+ * POST /api/ai/workflow/:workflowId/cancel
+ * 取消工作流
+ */
+router.post('/workflow/:workflowId/cancel', (req: Request, res: Response) => {
+  try {
+    const { workflowId } = req.params;
+
+    const success = cancelWorkflow(workflowId);
+
+    if (!success) {
+      return res.status(404).json({
+        success: false,
+        error: `Workflow not found: ${workflowId}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Workflow cancelled',
+    });
+  } catch (error: any) {
+    console.error('Cancel workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to cancel workflow',
+    });
+  }
+});
+
+/**
+ * GET /api/ai/workflow/list
+ * 获取所有工作流
+ */
+router.get('/workflow/list', (req: Request, res: Response) => {
+  try {
+    const workflows = getAllWorkflows();
+
+    res.json({
+      success: true,
+      data: { workflows },
+    });
+  } catch (error: any) {
+    console.error('List workflows error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to list workflows',
+    });
+  }
+});
+
+/**
+ * DELETE /api/ai/workflow/:workflowId
+ * 删除工作流
+ */
+router.delete('/workflow/:workflowId', (req: Request, res: Response) => {
+  try {
+    const { workflowId } = req.params;
+
+    const success = deleteWorkflow(workflowId);
+
+    if (!success) {
+      return res.status(404).json({
+        success: false,
+        error: `Workflow not found: ${workflowId}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Workflow deleted',
+    });
+  } catch (error: any) {
+    console.error('Delete workflow error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete workflow',
+    });
+  }
+});
+
+/**
+ * GET /api/workflow/preview/:filename
+ * 服务预览视频文件
+ */
+router.get('/workflow/preview/:filename', (req: Request, res: Response) => {
+  try {
+    const { filename } = req.params;
+    const path = require('path');
+    const fs = require('fs');
+    
+    const filePath = path.join('uploads', 'previews', filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Preview not found'
+      });
+    }
+
+    res.sendFile(path.resolve(filePath));
+  } catch (error: any) {
+    console.error('Serve preview error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to serve preview',
     });
   }
 });

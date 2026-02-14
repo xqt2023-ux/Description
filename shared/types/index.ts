@@ -31,6 +31,20 @@ export interface MediaMetadata {
   fps?: number;
   codec?: string;
   bitrate?: number;
+  
+  // Audio enhancement info
+  audioEnhanced?: boolean;
+  audioEnhancementStatus?: 'pending' | 'processing' | 'completed' | 'failed';
+  originalAudioPath?: string;
+  enhancedAudioPath?: string;
+  enhancementStats?: AudioEnhancementStats;
+}
+
+export interface AudioEnhancementStats {
+  noiseReductionLevel: number;      // 0-100
+  volumeAdjustment: number;         // dB
+  processingTime: number;           // seconds
+  provider: 'adobe' | 'ffmpeg' | 'local';
 }
 
 export interface MediaFile {
@@ -52,6 +66,12 @@ export interface Transcript {
   segments: TranscriptSegment[];
   createdAt: string;
   updatedAt: string;
+  // AI增强功能
+  title?: string;              // AI生成的标题
+  summary?: string;            // AI生成的摘要
+  chapters?: Chapter[];        // AI识别的章节
+  speakers?: Speaker[];        // 识别到的说话人
+  fillerWordsRemoved?: boolean; // 是否已移除填充词
 }
 
 export interface TranscriptSegment {
@@ -59,8 +79,30 @@ export interface TranscriptSegment {
   text: string;
   startTime: number;
   endTime: number;
-  speakerId?: string;
+  speakerId?: string;         // 说话人ID
+  speakerName?: string;       // 说话人名称
   words: Word[];
+  chapter?: string;           // 所属章节ID
+}
+
+export interface Speaker {
+  id: string;
+  label: string;              // 原始标签 (如 "SPEAKER_00", "SPEAKER_01")
+  customName?: string;        // 用户自定义名称 (如 "Alice", "Bob")
+  color?: string;             // 头像边框颜色 "#FF6B6B"
+  avatarPath?: string;        // 头像文件路径 "/uploads/avatars/xxx.jpg"
+  avatarUrl?: string;         // 头像完整URL
+  firstAppearance: number;    // 首次出现时间戳 (秒)
+  totalDuration: number;      // 总说话时长 (秒)
+  segmentCount: number;       // 说话片段数量
+}
+
+export interface Chapter {
+  id: string;
+  title: string;              // 章节标题
+  startTime: number;
+  endTime: number;
+  segmentIds: string[];       // 包含的片段ID列表
 }
 
 export interface Word {

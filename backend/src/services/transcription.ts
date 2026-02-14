@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { jobStore, Job } from './jobs';
 import { Transcript, TranscriptSegment, Word } from '../../../shared/types';
 import { storeTranscript } from './dubbing';
+import { enhanceTranscript, EnhancementOptions } from './transcriptionEnhancement';
 
 // Get proxy agent if configured
 function getHttpAgent() {
@@ -325,10 +326,33 @@ async function processTranscriptionJob(jobId: string): Promise<void> {
     // Transcribe
     const result = await transcribeAudio(audioPath, language);
 
-    jobStore.update(jobId, { progress: 80 });
+    jobStore.update(jobId, { progress: 50 });
 
     // Convert to Transcript type with word indices
-    const transcript = convertToTranscript(mediaId, result);
+    let transcript = convertToTranscript(mediaId, result);
+
+    jobStore.update(jobId, { progress: 60 });
+
+    // Apply AI enhancements if ANTHROPIC_API_KEY is configured
+    if (process.env.ANTHROPIC_API_KEY) {
+      console.log('[Transcription] Applying AI enhancements...');
+      try {
+        const enhancementResult = await enhanceTranscript(transcript);
+        if (enhancementResult.status === 'completed') {
+          transcript = enhancementResult.transcript;
+          console.log('[Transcription] AI enhancements applied:', {
+            title: transcript.title,
+            summary: transcript.summary?.substring(0, 50) + '...',
+            speakers: transcript.speakers?.length || 0,
+            chapters: transcript.chapters?.length || 0,
+          });
+        }
+      } catch (enhanceError: any) {
+        console.warn('[Transcription] AI enhancement failed, continuing with basic transcript:', enhanceError.message);
+      }
+    } else {
+      console.log('[Transcription] Skipping AI enhancements (ANTHROPIC_API_KEY not configured)');
+    }
 
     jobStore.update(jobId, { progress: 90 });
 

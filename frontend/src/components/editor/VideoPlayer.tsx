@@ -123,21 +123,28 @@ export function VideoPlayer() {
     video.muted = isMuted;
   }, [volume, isMuted]);
 
-  const togglePlay = () => {
+  // Sync isPlaying state with video element
+  useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     if (isPlaying) {
-      video.pause();
-    } else {
-      // Before playing, check if we're in a cut region
-      const nextPosition = getNextPlayPosition(video.currentTime);
-      if (nextPosition !== video.currentTime) {
-        video.currentTime = nextPosition;
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          console.error('Play failed:', error);
+          setIsPlaying(false);
+        });
       }
-      video.play();
+    } else {
+      video.pause();
     }
-  };
+  }, [isPlaying, setIsPlaying]);
+
+  const togglePlay = useCallback(() => {
+    console.log('togglePlay called, isPlaying:', isPlaying);
+    setIsPlaying(!isPlaying);
+  }, [isPlaying, setIsPlaying]);
 
   const seekTo = (time: number) => {
     const video = videoRef.current;
@@ -162,14 +169,27 @@ export function VideoPlayer() {
   const effectiveDuration = duration - totalCutDuration;
 
   return (
-    <div className="w-full max-w-4xl">
+    <div 
+      className="w-full max-w-4xl"
+      onClick={(e) => {
+        console.log('Outer div clicked!', e.target);
+      }}
+    >
       {/* Video Container */}
-      <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+      <div 
+        className="relative aspect-video bg-black rounded-lg overflow-hidden cursor-pointer"
+        title="Click to play/pause"
+      >
         {videoUrl ? (
           <video
             ref={videoRef}
             src={videoUrl}
-            className="w-full h-full object-contain"
+            className="w-full h-full object-contain cursor-pointer"
+            onClick={(e) => {
+              console.log('Video clicked!');
+              e.stopPropagation();
+              togglePlay();
+            }}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-editor-muted">

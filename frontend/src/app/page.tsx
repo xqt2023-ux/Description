@@ -36,6 +36,7 @@ import {
   X,
 } from 'lucide-react';
 import { mediaApi, aiApi, transcriptionApi, downloadEditedVideo, getUploadUrl } from '@/lib/api';
+import TemplateWorkflowCard from '@/components/editor/TemplateWorkflowCard';
 
 export default function HomePage() {
   const router = useRouter();
@@ -116,6 +117,9 @@ export default function HomePage() {
     createdAt: string;
   }>>([]);
   const [isLoadingMedia, setIsLoadingMedia] = useState(true);
+  
+  // Template expansion state
+  const [expandedTemplate, setExpandedTemplate] = useState<string | null>(null);
 
   // Fetch media list function (extracted for reuse)
   const fetchMediaList = async () => {
@@ -854,14 +858,99 @@ export default function HomePage() {
     return `${truncatedBase}...${ext}`;
   };
 
+  // Template workflow definitions
+  const templateWorkflows = {
+    'clean-up': {
+      icon: Scissors,
+      label: 'Clean up video recording',
+      setup: 'First, ask me to provide a file if there isn\'t already one in the project.\n\nOnce I\'ve provided a file, proceed with creating a plan for my workflow:',
+      workflow: [
+        'Edit the script to remove retakes, remove excessive filler words, shorten long pauses, and make light edits for clarity.',
+        'Clean up the audio by applying Studio Sound.',
+        'Add scenes and layouts at key moments. Be sure to include an intro. Fill b-roll with stock media.',
+        'Apply subtle zooms to hide jump cuts.'
+      ],
+      completion: 'After completing the workflow, suggest more relevant edits.'
+    },
+    'avatar': {
+      icon: Users,
+      label: 'Generate with an avatar',
+      setup: 'First, I\'ll need you to provide a script or transcript for your video.\n\nOnce you\'ve provided the content, I\'ll create a plan to:',
+      workflow: [
+        'Select an AI avatar that matches your style and tone.',
+        'Generate natural voice narration synchronized with the avatar.',
+        'Add relevant gestures and facial expressions to make it engaging.',
+        'Include branded elements like logos and background.',
+        'Apply smooth transitions between scenes.'
+      ],
+      completion: 'After generating the video, I can help you adjust the avatar style or voice if needed.'
+    },
+    'podcast': {
+      icon: Wand2,
+      label: 'Rough cut of podcast',
+      setup: 'First, provide your podcast recording file.\n\nThen I\'ll prepare a rough cut workflow:',
+      workflow: [
+        'Identify and label all speakers automatically.',
+        'Remove long pauses and dead air (over 2 seconds).',
+        'Delete filler words (um, uh, like, you know) to tighten the pace.',
+        'Apply audio leveling to balance speaker volumes.',
+        'Generate chapter markers for key topics discussed.',
+        'Add intro/outro music if desired.'
+      ],
+      completion: 'After the rough cut, I can help with fine-tuning or creating social media clips from highlights.'
+    },
+    'social-clips': {
+      icon: Video,
+      label: 'Create social clips',
+      setup: 'Provide a video file, and I\'ll analyze it to find the best moments.\n\nMy workflow will include:',
+      workflow: [
+        'Analyze content to identify engaging highlights and key moments.',
+        'Extract 3-5 clips optimized for social media (15-60 seconds each).',
+        'Resize to vertical format (9:16) for TikTok, Instagram, YouTube Shorts.',
+        'Add animated captions with eye-catching styles.',
+        'Apply trending music and sound effects.',
+        'Generate hooks and CTAs for each clip.'
+      ],
+      completion: 'I\'ll provide all clips ready to publish, along with suggested captions and hashtags.'
+    },
+    'slides': {
+      icon: Monitor,
+      label: 'Turn slides into video',
+      setup: 'Upload your PowerPoint or PDF presentation file.\n\nI\'ll then create a video workflow:',
+      workflow: [
+        'Extract all slides and analyze the content structure.',
+        'Generate a natural narration script for each slide.',
+        'Create AI voiceover that explains each point clearly.',
+        'Add smooth transitions between slides.',
+        'Synchronize timing so narration matches slide content.',
+        'Include background music and professional intro/outro.'
+      ],
+      completion: 'Your presentation video will be ready to share or upload to your learning platform.'
+    },
+    'animated': {
+      icon: Play,
+      label: 'Generate animated video',
+      setup: 'Tell me what video you want to create - just describe your idea or paste a script.\n\nI\'ll build a complete video with:',
+      workflow: [
+        'Analyze your concept and break it into scenes.',
+        'Select relevant stock footage, images, and animations.',
+        'Generate professional voiceover narration.',
+        'Add animated text overlays and motion graphics.',
+        'Apply transitions, effects, and background music.',
+        'Include branded elements like logos and colors.'
+      ],
+      completion: 'You\'ll have a polished animated video ready to publish in minutes, not hours.'
+    }
+  };
+
   const quickActions = [
-    { icon: Scissors, label: 'Clean up video recording', action: null },
-    { icon: Users, label: 'Generate with an avatar', action: null },
-    { icon: Wand2, label: 'Rough cut of podcast', action: null },
-    { icon: Video, label: 'Create social clips', action: null },
-    { icon: Languages, label: 'Translate & dub video', action: handleTranslateClick },
-    { icon: Monitor, label: 'Turn slides into video', action: null },
-    { icon: Play, label: 'Generate animated video', action: null },
+    { ...templateWorkflows['clean-up'], id: 'clean-up' },
+    { ...templateWorkflows['avatar'], id: 'avatar' },
+    { ...templateWorkflows['podcast'], id: 'podcast' },
+    { ...templateWorkflows['social-clips'], id: 'social-clips' },
+    { id: 'translate', icon: Languages, label: 'Translate & dub video', action: handleTranslateClick, special: true },
+    { ...templateWorkflows['slides'], id: 'slides' },
+    { ...templateWorkflows['animated'], id: 'animated' },
   ];
 
   const popularFeatures = [
@@ -1670,35 +1759,44 @@ export default function HomePage() {
                 </h1>
               </div>
 
-              {/* Quick Action Buttons - Row 1 */}
-              <div className="flex flex-wrap justify-center gap-2 mb-3">
-                {quickActions.slice(0, 4).map((action, index) => (
-                  <button
-                    key={index}
-                    onClick={action.action || undefined}
-                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-full text-sm text-gray-700 hover:shadow-md transition border border-gray-200 hover:border-gray-300"
-                  >
-                    <action.icon className="w-4 h-4 text-purple-600" />
-                    <span>{action.label}</span>
-                  </button>
-                ))}
-              </div>
-              
-              {/* Quick Action Buttons - Row 2 */}
-              <div className="flex flex-wrap justify-center gap-2 mb-8">
-                {quickActions.slice(4).map((action, index) => (
-                  <button
-                    key={index}
-                    onClick={action.action || undefined}
-                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-full text-sm text-gray-700 hover:shadow-md transition border border-gray-200 hover:border-gray-300"
-                  >
-                    <action.icon className="w-4 h-4 text-purple-600" />
-                    <span>{action.label}</span>
-                  </button>
-                ))}
-                <button className="text-sm text-purple-600 hover:underline px-3">
-                  Browse more templates...
-                </button>
+              {/* Template Workflow Cards */}
+              <div className="space-y-4 mb-8 w-full">
+                {quickActions.map((action) => {
+                  // Handle special "Translate & dub" button differently
+                  if ('special' in action && action.special) {
+                    return (
+                      <button
+                        key={action.id}
+                        onClick={action.action}
+                        className="w-full max-w-4xl mx-auto flex items-center gap-3 px-6 py-4 bg-white rounded-xl text-sm text-gray-700 hover:shadow-md transition border border-gray-200 hover:border-gray-300"
+                      >
+                        <action.icon className="w-5 h-5 text-purple-600" />
+                        <span className="font-medium">{action.label}</span>
+                      </button>
+                    );
+                  }
+                  
+                  // Render template workflow cards
+                  if ('setup' in action && 'workflow' in action && 'completion' in action) {
+                    return (
+                      <TemplateWorkflowCard
+                        key={action.id}
+                        id={action.id}
+                        icon={action.icon}
+                        label={action.label}
+                        setup={action.setup}
+                        workflow={action.workflow}
+                        completion={action.completion}
+                        isExpanded={expandedTemplate === action.id}
+                        onToggle={() => {
+                          setExpandedTemplate(expandedTemplate === action.id ? null : action.id);
+                        }}
+                      />
+                    );
+                  }
+                  
+                  return null;
+                })}
               </div>
 
               {/* Input Box */}

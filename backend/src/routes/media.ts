@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { enhanceAudio, isAudioEnhancementEnabled, getEnhancedAudioPath } from '../services/audioEnhancement';
 
 const router = Router();
 
@@ -324,6 +325,44 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
       }
     } else if (type === 'image') {
       mediaPath = path.join(process.cwd(), 'uploads', 'images', uploadResult.filename);
+    }
+
+    // Auto-enhance audio if enabled (for video/audio files)
+    if (isAudioEnhancementEnabled() && (type === 'video' || type === 'audio') && mediaPath) {
+      console.log('[Media] Auto-enhancing audio (Studio Sound)...');
+      metadata.audioEnhancementStatus = 'processing';
+      
+      try {
+        const enhancedPath = getEnhancedAudioPath(mediaPath);
+        const enhancementResult = await enhanceAudio(mediaPath, enhancedPath);
+        
+        if (enhancementResult.success) {
+          // Replace original audio/video file with enhanced version
+          if (type === 'audio') {
+            // For audio files, replace the file directly
+            fs.renameSync(enhancedPath, mediaPath);
+          } else if (type === 'video') {
+            // For video files, replace audio track
+            // TODO: Implement video audio replacement
+            console.log('[Media] Video audio enhancement - using enhanced audio');
+          }
+          
+          // Update metadata
+          metadata.audioEnhanced = true;
+          metadata.audioEnhancementStatus = 'completed';
+          metadata.enhancementStats = enhancementResult.stats;
+          
+          console.log(`[Media] Audio enhancement completed in ${enhancementResult.stats.processingTime}s`);
+        } else {
+          console.warn('[Media] Audio enhancement failed, using original:', enhancementResult.error);
+          metadata.audioEnhanced = false;
+          metadata.audioEnhancementStatus = 'failed';
+        }
+      } catch (enhanceError: any) {
+        console.error('[Media] Audio enhancement error:', enhanceError);
+        metadata.audioEnhanced = false;
+        metadata.audioEnhancementStatus = 'failed';
+      }
     }
 
     const media = {

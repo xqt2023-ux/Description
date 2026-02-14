@@ -47,7 +47,7 @@ export async function chatWithClaude(
   return textContent ? textContent.text : '';
 }
 
-// Remove filler words from transcript
+// Remove filler words from transcript (Chinese & English)
 export async function removeFillerWords(transcript: string): Promise<ClaudeSkillResult> {
   try {
     const client = getClaudeClient();
@@ -55,7 +55,12 @@ export async function removeFillerWords(transcript: string): Promise<ClaudeSkill
     const response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
-      system: 'You are a transcript editor. Remove filler words (um, uh, like, you know, so, actually, basically, literally, right, I mean, kind of, sort of) from the transcript while maintaining natural flow and meaning. Return ONLY the cleaned transcript, no explanations.',
+      system: `You are a professional transcript editor. Remove filler words while maintaining natural flow and meaning. 
+
+For English: um, uh, like, you know, so, actually, basically, literally, right, I mean, kind of, sort of, well, yeah, okay
+For Chinese: 嗯, 啊, 呃, 那个, 这个, 就是, 然后, 对吧, 是吧, 其实, 反正, 就是说, 怎么说呢
+
+Return ONLY the cleaned transcript, no explanations or formatting changes.`,
       messages: [{
         role: 'user',
         content: `Please remove filler words from this transcript:\n\n${transcript}`,
@@ -222,30 +227,168 @@ export async function translateTranscript(transcript: string, targetLanguage: st
   }
 }
 
-// Generate chapters/timestamps
-export async function generateChapters(transcript: string): Promise<ClaudeSkillResult> {
+// Generate chapters/timestamps with structured data
+export async function generateChapters(transcript: string, segments: any[]): Promise<ClaudeSkillResult> {
   try {
     const client = getClaudeClient();
     
+    // Create a simplified version with timestamps
+    const transcriptWithTime = segments.map(seg => 
+      `[${formatTime(seg.startTime)} - ${formatTime(seg.endTime)}] ${seg.text}`
+    ).join('\n');
+    
     const response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: 'You are a video editor. Analyze the transcript and suggest chapter markers with titles. Format as: [Timestamp placeholder] - Chapter Title. Group related content into logical chapters.',
+      max_tokens: 2048,
+      system: `You are a video editor analyzing transcripts. Generate chapter markers by identifying topic changes and logical breaks.
+
+Return a JSON array with this structure:
+[
+  {
+    "title": "章节标题",
+    "startTime": 0,
+    "endTime": 120,
+    "description": "简短描述"
+  }
+]
+
+Rules:
+- Create 3-8 chapters depending on content length
+- Use descriptive, engaging titles
+- Ensure chapters don't overlap
+- Cover the entire duration`,
       messages: [{
         role: 'user',
-        content: `Please generate chapter markers for this video transcript:\n\n${transcript}`,
+        content: `Analyze this transcript and generate chapter markers:\n\n${transcriptWithTime}`,
+      }],
+    });
+
+    const textContent = response.content.find(c => c.type === 'text');
+    if (!textContent) {
+      return { success: false, error: 'No response' };
+    }
+
+    // Try to parse JSON response
+    let result = textContent.text.trim();
+    if (result.startsWith('```')) {
+      result = result.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    return {
+      success: true,
+      result,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.message || 'Failed to generate chapters',
+    };
+  }
+}
+
+// Helper function to format time
+function formatTime(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Generate title for video based on transcript
+export async function generateTitle(transcript: string): Promise<ClaudeSkillResult> {
+  try {
+    const client = getClaudeClient();
+    
+    // Use first 2000 characters for title generation
+    const excerpt = transcript.substring(0, 2000);
+    
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 256,
+      system: `You are a content strategist. Generate an engaging, descriptive title for a video based on its transcript.
+
+Requirements:
+- 8-15 words
+- Capture the main topic
+- Be engaging and click-worthy
+- Use the same language as the transcript
+- Return ONLY the title, nothing else`,
+      messages: [{
+        role: 'user',
+        content: `Generate a title for this video:\n\n${excerpt}`,
       }],
     });
 
     const textContent = response.content.find(c => c.type === 'text');
     return {
       success: true,
-      result: textContent ? textContent.text : '',
+      result: textContent ? textContent.text.trim() : '',
     };
   } catch (error: any) {
     return {
       success: false,
-      error: error.message || 'Failed to generate chapters',
+      error: error.message || 'Failed to generate title',
+    };
+  }
+}
+
+// Identify and label speakers in transcript
+export async function identifySpeakers(segments: any[]): Promise<ClaudeSkillResult> {
+  try {
+    const client = getClaudeClient();
+    
+    // Create a sample of segments for analysis
+    const sample = segments.slice(0, Math.min(50, segments.length)).map((seg, idx) => ({
+      index: idx,
+      text: seg.text,
+      duration: seg.endTime - seg.startTime,
+    }));
+    
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      system: `You are analyzing a transcript to identify different speakers. Based on content, tone, and topic changes, estimate how many speakers there are.
+
+Return a JSON object:
+{
+  "speakerCount": 1-5,
+  "segments": [
+    {
+      "index": 0,
+      "speakerId": "speaker-1",
+      "confidence": 0.8,
+      "reasoning": "brief explanation"
+    }
+  ]
+}
+
+Rules:
+- Most videos have 1-3 speakers
+- Look for dialogue patterns, questions/answers, topic shifts
+- Be conservative - when unsure, assume same speaker`,
+      messages: [{
+        role: 'user',
+        content: `Analyze these transcript segments:\n\n${JSON.stringify(sample, null, 2)}`,
+      }],
+    });
+
+    const textContent = response.content.find(c => c.type === 'text');
+    if (!textContent) {
+      return { success: false, error: 'No response' };
+    }
+
+    let result = textContent.text.trim();
+    if (result.startsWith('```')) {
+      result = result.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    return {
+      success: true,
+      result,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error.message || 'Failed to identify speakers',
     };
   }
 }
@@ -431,7 +574,7 @@ export async function executeEditTask(
     case 'improve':
       return improveTranscript(transcript);
     case 'chapters':
-      return generateChapters(transcript);
+      return generateChapters(transcript, []);
     case 'social':
       return generateSocialPosts(transcript, task.params?.platform || 'twitter');
     case 'show-notes':

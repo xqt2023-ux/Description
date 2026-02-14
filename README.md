@@ -22,28 +22,43 @@ descript-clone/
 ## 🛠️ Tech Stack
 
 ### Frontend
-- Next.js 14 (App Router)
-- TypeScript
-- Tailwind CSS
-- Zustand (State Management)
-- React Query (Data Fetching)
-- Slate.js (Rich Text Editor)
+
+- **Next.js 14** (App Router)
+- **TypeScript**
+- **Tailwind CSS** (Styling)
+- **Zustand** (State Management with undo/redo)
+- **React Query** (Data Fetching)
+- **Slate.js** (Rich Text Editor)
 
 ### Backend
-- Node.js + Express
-- TypeScript
-- FFmpeg (Video Processing)
-- OpenAI Whisper (Transcription)
-- PostgreSQL + Redis (Data Storage)
+
+- **Node.js + Express**
+- **TypeScript**
+- **FFmpeg** (Video/Audio Processing)
+- **AI Services**:
+  - **Anthropic Claude** (Text analysis, filler word removal, summarization)
+  - **Groq Whisper** (Fast, free transcription - primary)
+  - **OpenAI Whisper** (Backup transcription)
+- **node-edge-tts** (Text-to-Speech)
+- **BullMQ + Redis** (Job Queue - configured, not yet used)
+- **PostgreSQL** (Database - configured, not yet used)
+- **Drizzle ORM** (Type-safe database queries)
 
 ## 🏁 Getting Started
 
 ### Prerequisites
 
-- Node.js 18+
-- FFmpeg installed
-- PostgreSQL (optional, for production)
-- Redis (optional, for job queue)
+- **Node.js 18+**
+- **FFmpeg** (必须安装，用于视频处理)
+  - Windows: 下载 [FFmpeg](https://ffmpeg.org/download.html) 并添加到 PATH
+  - Mac: `brew install ffmpeg`
+  - Linux: `sudo apt-get install ffmpeg`
+- **API Keys** (至少需要一个转录服务):
+  - **Groq API Key** (推荐 - 免费且快速) - [获取](https://console.groq.com/keys)
+  - **Anthropic Claude API Key** (用于AI功能) - [获取](https://console.anthropic.com/settings/keys)
+  - **OpenAI API Key** (可选 - 备用转录) - [获取](https://platform.openai.com/api-keys)
+- **PostgreSQL** (可选，当前未使用)
+- **Redis** (可选，当前未使用)
 
 ### Installation
 
@@ -66,9 +81,22 @@ npm install
 ```
 
 4. Set up environment variables:
+
+**后端配置:**
 ```bash
+cd backend
 cp .env.example .env
-# Edit .env with your configuration
+# 编辑 .env 文件，添加您的 API keys:
+# - ANTHROPIC_API_KEY (必需)
+# - GROQ_API_KEY (必需，用于转录)
+# - OPENAI_API_KEY (可选)
+```
+
+**前端配置:**
+```bash
+cd ../frontend
+cp .env.example .env.local
+# 默认配置已经足够，除非您修改了后端端口
 ```
 
 5. Start the development servers:
@@ -91,13 +119,34 @@ npm run dev
 
 ### Backend (.env)
 
+#### 必需配置
+
+| Variable | Description | 获取方式 |
+|----------|-------------|----------|
+| `ANTHROPIC_API_KEY` | Claude AI API key | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| `GROQ_API_KEY` | Groq Whisper API key (转录) | [console.groq.com](https://console.groq.com/keys) |
+| `FFMPEG_PATH` | FFmpeg 可执行文件路径 | 安装后通常为 `ffmpeg` |
+| `FFPROBE_PATH` | FFprobe 可执行文件路径 | 安装后通常为 `ffprobe` |
+
+#### 可选配置
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PORT` | Server port | `3001` |
-| `DATABASE_URL` | PostgreSQL connection string | - |
-| `REDIS_URL` | Redis connection string | - |
-| `OPENAI_API_KEY` | OpenAI API key for Whisper | - |
-| `UPLOAD_DIR` | Directory for uploaded files | `./uploads` |
+| `PORT` | 服务器端口 | `3001` |
+| `OPENAI_API_KEY` | OpenAI API key (备用转录) | - |
+| `UPLOAD_DIR` | 上传文件目录 | `./uploads` |
+| `EXPORT_DIR` | 导出文件目录 | `./exports` |
+| `MAX_FILE_SIZE` | 最大文件大小 | `500MB` |
+| `HTTP_PROXY` | HTTP 代理地址 (企业环境) | - |
+| `HTTPS_PROXY` | HTTPS 代理地址 (企业环境) | - |
+| `DATABASE_URL` | PostgreSQL 连接 (未使用) | - |
+| `REDIS_URL` | Redis 连接 (未使用) | - |
+
+### Frontend (.env.local)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NEXT_PUBLIC_API_URL` | 后端 API 地址 | `http://localhost:3001` |
 
 ## 🤝 Contributing
 

@@ -231,6 +231,43 @@ export const aiApi = {
   getHistory: (mediaId: string) => api.get(`/ai/orchestrate/${mediaId}/history`),
 };
 
+// Interactive Workflow APIs
+export const workflowApi = {
+  // Create workflow
+  create: (
+    userRequest: string,
+    mediaId: string,
+    mediaInfo: { duration: number; hasAudio: boolean; width?: number; height?: number }
+  ) => api.post('/ai/workflow/create', { userRequest, mediaId, mediaInfo }, { timeout: 60000 }),
+
+  // Get workflow status
+  get: (workflowId: string) => api.get(`/ai/workflow/${workflowId}`),
+
+  // Execute a step
+  executeStep: (workflowId: string, stepId: string) =>
+    api.post(`/ai/workflow/${workflowId}/step/${stepId}/execute`, {}, { timeout: 120000 }),
+
+  // Confirm step
+  confirmStep: (workflowId: string, stepId: string, approved: boolean) =>
+    api.post(`/ai/workflow/${workflowId}/step/${stepId}/confirm`, { approved }),
+
+  // Skip step
+  skipStep: (workflowId: string, stepId: string) =>
+    api.post(`/ai/workflow/${workflowId}/step/${stepId}/skip`),
+
+  // Undo to previous step
+  undo: (workflowId: string) => api.post(`/ai/workflow/${workflowId}/undo`),
+
+  // Cancel workflow
+  cancel: (workflowId: string) => api.post(`/ai/workflow/${workflowId}/cancel`),
+
+  // List all workflows
+  list: () => api.get('/ai/workflow/list'),
+
+  // Delete workflow
+  delete: (workflowId: string) => api.delete(`/ai/workflow/${workflowId}`),
+};
+
 // Direct file download helper
 export const downloadEditedVideo = (filename: string): string => {
   return `${API_BASE_URL}/api/export/download/${filename}`;

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditorStore } from '@/stores/editorStore';
-import { transcriptionApi, mediaApi } from '@/lib/api';
+import { transcriptionApi, mediaApi, getUploadUrl } from '@/lib/api';
 import Link from 'next/link';
 import {
   Play,
@@ -184,8 +184,10 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       
       const mediaId = response.data.data.id;
       const mediaUrl = response.data.data.url;
-      
-      setVideoUrl(mediaUrl);
+
+      // Convert relative URL to absolute URL
+      const fullMediaUrl = getUploadUrl(mediaUrl);
+      setVideoUrl(fullMediaUrl);
       URL.revokeObjectURL(localPreviewUrl);
       
       addMediaFile({

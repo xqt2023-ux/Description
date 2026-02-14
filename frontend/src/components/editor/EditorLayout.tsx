@@ -6,6 +6,7 @@ import { TranscriptEditor } from './TranscriptEditor';
 import { Timeline } from '../timeline/Timeline';
 import { Toolbar } from './Toolbar';
 import { MediaLibrary } from './MediaLibrary';
+import { InteractiveWorkflowSidebar } from './InteractiveWorkflowSidebar';
 import { useEditorStore } from '@/stores/editorStore';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
@@ -15,7 +16,15 @@ interface EditorLayoutProps {
 
 export function EditorLayout({ projectId }: EditorLayoutProps) {
   const [showSidebar, setShowSidebar] = useState(true);
+  const [showWorkflowSidebar, setShowWorkflowSidebar] = useState(false);
+  const [workflowId, setWorkflowId] = useState<string | null>(null);
   const { currentTime, duration, isPlaying } = useEditorStore();
+
+  const handleStartInteractiveEdit = (userRequest: string) => {
+    // This will be called from Toolbar
+    setShowWorkflowSidebar(true);
+    // WorkflowId will be set by the InteractiveWorkflowSidebar component
+  };
 
   return (
     <div className="h-screen flex flex-col bg-editor-bg">
@@ -52,20 +61,31 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
               <VideoPlayer />
             </div>
 
-            {/* Transcript Panel */}
-            <div className="w-96 border-l border-editor-border bg-editor-surface overflow-hidden flex flex-col">
-              <div className="p-4 border-b border-editor-border">
-                <h2 className="font-semibold">Transcript</h2>
-                <p className="text-sm text-editor-muted">
-                  Edit text to edit video
-                </p>
+            {/* Transcript Panel - Hide when workflow sidebar is shown */}
+            {!showWorkflowSidebar && (
+              <div className="w-96 border-l border-editor-border bg-editor-surface overflow-hidden flex flex-col">
+                <div className="p-4 border-b border-editor-border">
+                  <h2 className="font-semibold">Transcript</h2>
+                  <p className="text-sm text-editor-muted">
+                    Edit text to edit video
+                  </p>
+                </div>
+                <div className="flex-1 overflow-auto p-4">
+                  <TranscriptEditor />
+                </div>
               </div>
-              <div className="flex-1 overflow-auto p-4">
-                <TranscriptEditor />
-              </div>
-            </div>
+            )}
           </div>
         </main>
+
+        {/* Right Sidebar - Interactive Workflow */}
+        {showWorkflowSidebar && workflowId && (
+          <aside className="w-96 border-l border-editor-border bg-editor-surface overflow-hidden">
+            <InteractiveWorkflowSidebar
+              workflowId={workflowId}
+            />
+          </aside>
+        )}
       </div>
 
       {/* Bottom - Timeline */}

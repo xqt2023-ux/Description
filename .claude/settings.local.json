@@ -3,7 +3,9 @@
     "allow": [
       "Bash(code .)",
       "Bash(npm run build:*)",
-      "Bash(npm run restart:*)"
+      "Bash(npm run restart:*)",
+      "Bash(npx tsc:*)",
+      "Bash(backend/src/services/audioEnhancement.ts << 'EOF'\n/**\n * Audio Enhancement Service \\(Studio Sound\\)\n * STATUS: STUB IMPLEMENTATION\n */\n\nexport interface AudioEnhancementResult {\n  success: boolean;\n  outputPath?: string;\n  error?: string;\n}\n\nexport async function enhanceAudio\\(\n  inputPath: string,\n  outputPath: string\n\\): Promise<AudioEnhancementResult> {\n  // TODO: Implement audio enhancement\n  return {\n    success: true,\n    outputPath,\n  };\n}\n\nexport function isAudioEnhancementEnabled\\(\\): boolean {\n  return false; // Disabled by default \\(not implemented\\)\n}\n\nexport async function getEnhancedAudioPath\\(mediaId: string\\): Promise<string | null> {\n  // TODO: Check if enhanced version exists\n  return null;\n}\nEOF)"
     ]
   }
 }
