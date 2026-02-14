@@ -1,3 +1,14 @@
+/**
+ * BACKUP FILE - DO NOT USE
+ *
+ * This is the old version of DescriptEditor, preserved as backup.
+ * The active version is DescriptEditorNew.tsx
+ *
+ * Created: ~2026-01-28
+ * Replaced by: DescriptEditorNew.tsx (2026-02-11)
+ * Reason: Simplified implementation, better performance
+ */
+
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';

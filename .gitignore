@@ -25,6 +25,10 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+nul
+*.tmp
+*.temp
+desktop.ini
 
 # Logs
 logs/
