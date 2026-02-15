@@ -336,7 +336,7 @@ router.post('/execute-workflow', async (req: Request, res: Response) => {
  */
 router.post('/orchestrate', async (req: Request, res: Response) => {
   try {
-    const { userRequest, mediaId, mediaInfo, autoExecute } = req.body;
+    const { userRequest, mediaId, mediaInfo } = req.body;
 
     if (!userRequest || typeof userRequest !== 'string') {
       return res.status(400).json({
@@ -367,17 +367,14 @@ router.post('/orchestrate', async (req: Request, res: Response) => {
     const result = await orchestrateVideoEdit(
       userRequest,
       mediaId,
-      mediaInfo as MediaInfo,
-      autoExecute || false,
-      filePath  // Pass actual file path
+      mediaInfo as MediaInfo
     );
 
     res.json({
       success: true,
       data: {
-        parsedRequest: result.parsedRequest,
-        plan: result.plan,
-        executionResult: result.executionResult,
+        planId: result.planId,
+        message: result.message,
       },
     });
   } catch (error: any) {
@@ -436,7 +433,7 @@ router.post('/orchestrate/:planId/execute', async (req: Request, res: Response) 
       });
     }
 
-    if (plan.status === 'executing') {
+    if (plan.status === 'in_progress') {
       return res.status(409).json({
         success: false,
         error: 'Plan is already being executed',
@@ -450,14 +447,13 @@ router.post('/orchestrate/:planId/execute', async (req: Request, res: Response) 
       });
     }
 
-    const executionResult = await executeEditPlan(plan);
+    const executionResult = await executeEditPlan(plan.id);
 
     res.json({
       success: executionResult.success,
       data: {
-        outputPath: executionResult.outputPath,
-        executedSteps: executionResult.executedSteps,
-        totalSteps: executionResult.totalSteps,
+        planId: executionResult.planId,
+        completedTasks: executionResult.completedTasks,
       },
       error: executionResult.error,
     });
@@ -506,18 +502,16 @@ router.post('/orchestrate/:mediaId/undo', async (req: Request, res: Response) =>
     if (!result.success) {
       return res.status(400).json({
         success: false,
-        error: result.error,
+        error: result.message,
       });
     }
-
-    const history = getEditHistory(mediaId);
 
     res.json({
       success: true,
       data: {
-        restoredState: result.restoredState,
-        remainingUndoSteps: result.remainingUndoSteps,
-        canRedo: history.canRedo,
+        message: result.message,
+        canUndo: result.canUndo,
+        canRedo: result.canRedo,
       },
     });
   } catch (error: any) {
@@ -542,18 +536,16 @@ router.post('/orchestrate/:mediaId/redo', async (req: Request, res: Response) =>
     if (!result.success) {
       return res.status(400).json({
         success: false,
-        error: result.error,
+        error: result.message,
       });
     }
-
-    const history = getEditHistory(mediaId);
 
     res.json({
       success: true,
       data: {
-        restoredState: result.restoredState,
-        remainingRedoSteps: result.remainingRedoSteps,
-        canUndo: history.canUndo,
+        message: result.message,
+        canUndo: result.canUndo,
+        canRedo: result.canRedo,
       },
     });
   } catch (error: any) {
@@ -596,12 +588,12 @@ router.delete('/orchestrate/:mediaId/history', (req: Request, res: Response) => 
   try {
     const { mediaId } = req.params;
 
-    const result = clearEditHistory(mediaId);
+    clearEditHistory(mediaId);
 
     res.json({
       success: true,
       data: {
-        clearedCount: result.clearedCount,
+        message: 'Edit history cleared',
       },
     });
   } catch (error: any) {
@@ -644,31 +636,29 @@ router.post('/workflow/create', async (req: Request, res: Response) => {
       });
     }
 
-    // Get source file path
+    // Verify media exists
     const media = getMediaById(mediaId);
-    const sourceFilePath = media?.filePath || media?.filename;
-
-    if (!sourceFilePath) {
+    if (!media) {
       return res.status(404).json({
         success: false,
-        error: `Media file not found: ${mediaId}`,
+        error: `Media not found: ${mediaId}`,
       });
     }
 
-    const result = await createInteractiveWorkflow(
+    const workflow = await createInteractiveWorkflow(
       userRequest,
       mediaId,
-      sourceFilePath,
       mediaInfo as MediaInfo
     );
 
-    if (!result.success) {
-      return res.status(500).json(result);
-    }
-
     res.json({
       success: true,
-      data: { workflow: result.workflow },
+      data: {
+        workflowId: workflow.id,
+        steps: workflow.steps,
+        status: workflow.status,
+        currentStepIndex: workflow.currentStepIndex,
+      },
     });
   } catch (error: any) {
     console.error('Create workflow error:', error);
@@ -718,24 +708,16 @@ router.post('/workflow/:workflowId/step/:stepId/execute', async (req: Request, r
 
     const result = await executeWorkflowStep(workflowId, stepId);
 
-    if (!result.success) {
-      return res.status(500).json({
-        success: false,
-        error: result.error,
-      });
-    }
-
     // Return updated workflow
     const workflow = getWorkflow(workflowId);
 
     res.json({
       success: true,
       data: {
-        step: {
-          previewPath: result.previewPath,
-          previewUrl: result.previewUrl,
-          ffmpegCommand: result.ffmpegCommand,
-        },
+        stepId: result.stepId,
+        status: result.status,
+        preview: result.preview,
+        requiresConfirmation: result.requiresConfirmation,
         workflow,
       },
     });
@@ -765,19 +747,15 @@ router.post('/workflow/:workflowId/step/:stepId/confirm', async (req: Request, r
     }
 
     const result = await confirmStep(workflowId, stepId, approved);
-
-    if (!result.success) {
-      return res.status(500).json({
-        success: false,
-        error: result.error,
-      });
-    }
+    const workflow = getWorkflow(workflowId);
 
     res.json({
       success: true,
       data: {
-        workflow: result.workflow,
-        nextStepReady: result.nextStepReady,
+        stepId: result.stepId,
+        status: result.status,
+        nextStep: result.nextStep,
+        workflow,
       },
     });
   } catch (error: any) {
@@ -798,19 +776,15 @@ router.post('/workflow/:workflowId/step/:stepId/skip', async (req: Request, res:
     const { workflowId, stepId } = req.params;
 
     const result = await skipStep(workflowId, stepId);
-
-    if (!result.success) {
-      return res.status(500).json({
-        success: false,
-        error: result.error,
-      });
-    }
+    const workflow = getWorkflow(workflowId);
 
     res.json({
       success: true,
       data: {
-        workflow: result.workflow,
-        nextStepReady: result.nextStepReady,
+        stepId: result.stepId,
+        status: result.status,
+        nextStep: result.nextStep,
+        workflow,
       },
     });
   } catch (error: any) {
@@ -835,15 +809,18 @@ router.post('/workflow/:workflowId/undo', async (req: Request, res: Response) =>
     if (!result.success) {
       return res.status(400).json({
         success: false,
-        error: result.error,
+        error: result.message,
       });
     }
+
+    const workflow = getWorkflow(workflowId);
 
     res.json({
       success: true,
       data: {
-        workflow: result.workflow,
-        nextStepReady: result.nextStepReady,
+        currentStep: result.currentStep,
+        message: result.message,
+        workflow,
       },
     });
   } catch (error: any) {

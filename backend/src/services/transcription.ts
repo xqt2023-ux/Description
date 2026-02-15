@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { jobStore, Job } from './jobs';
 import { Transcript, TranscriptSegment, Word } from '../../../shared/types';
 import { storeTranscript } from './dubbing';
-import { enhanceTranscript, EnhancementOptions } from './transcriptionEnhancement';
+import { enhanceTranscription } from './transcriptionEnhancement';
 
 // Get proxy agent if configured
 function getHttpAgent() {
@@ -337,9 +337,9 @@ async function processTranscriptionJob(jobId: string): Promise<void> {
     if (process.env.ANTHROPIC_API_KEY) {
       console.log('[Transcription] Applying AI enhancements...');
       try {
-        const enhancementResult = await enhanceTranscript(transcript);
-        if (enhancementResult.status === 'completed') {
-          transcript = enhancementResult.transcript;
+        const enhancementResult = await enhanceTranscription(transcript);
+        if (enhancementResult.success && enhancementResult.enhancedTranscript) {
+          transcript = enhancementResult.enhancedTranscript;
           console.log('[Transcription] AI enhancements applied:', {
             title: transcript.title,
             summary: transcript.summary?.substring(0, 50) + '...',

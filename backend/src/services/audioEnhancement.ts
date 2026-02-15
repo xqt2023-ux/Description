@@ -7,6 +7,9 @@ export interface AudioEnhancementResult {
   success: boolean;
   outputPath?: string;
   error?: string;
+  stats?: {
+    processingTime: number;
+  };
 }
 
 export async function enhanceAudio(
@@ -24,7 +27,8 @@ export function isAudioEnhancementEnabled(): boolean {
   return false; // Disabled by default (not implemented)
 }
 
-export async function getEnhancedAudioPath(mediaId: string): Promise<string | null> {
-  // TODO: Check if enhanced version exists
-  return null;
+export function getEnhancedAudioPath(inputPath: string): string {
+  const ext = inputPath.lastIndexOf('.');
+  if (ext === -1) return `${inputPath}_enhanced`;
+  return `${inputPath.substring(0, ext)}_enhanced${inputPath.substring(ext)}`;
 }

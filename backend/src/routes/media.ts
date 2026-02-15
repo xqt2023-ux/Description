@@ -352,7 +352,7 @@ router.post('/', upload.single('file'), handleUploadError, async (req: Request, 
           metadata.audioEnhancementStatus = 'completed';
           metadata.enhancementStats = enhancementResult.stats;
           
-          console.log(`[Media] Audio enhancement completed in ${enhancementResult.stats.processingTime}s`);
+          console.log(`[Media] Audio enhancement completed in ${enhancementResult.stats?.processingTime ?? 'unknown'}s`);
         } else {
           console.warn('[Media] Audio enhancement failed, using original:', enhancementResult.error);
           metadata.audioEnhanced = false;

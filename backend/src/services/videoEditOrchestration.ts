@@ -64,6 +64,12 @@ export interface EditHistoryEntry {
   afterState: any;
 }
 
+// Counter for unique ID generation
+let idCounter = 0;
+function generateUniqueId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${idCounter++}`;
+}
+
 // ========================================
 // In-Memory Storage (Replace with database)
 // ========================================
@@ -84,7 +90,7 @@ export async function parseUserRequest(
 ): Promise<EditPlan> {
   // TODO: Use Claude AI to parse request and generate tasks
   const plan: EditPlan = {
-    id: `plan-${Date.now()}`,
+    id: generateUniqueId('plan'),
     mediaId: mediaInfo.id,
     userRequest,
     tasks: [],
@@ -105,7 +111,7 @@ export async function generateEditPlan(
 ): Promise<EditPlan> {
   // TODO: Implement AI-powered plan generation
   const plan: EditPlan = {
-    id: `plan-${Date.now()}`,
+    id: generateUniqueId('plan'),
     mediaId,
     userRequest,
     tasks: [
