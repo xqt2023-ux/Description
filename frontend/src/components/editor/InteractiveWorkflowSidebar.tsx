@@ -1,420 +1,368 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { workflowApi } from '@/lib/api';
+import { useState, useEffect, useRef } from 'react';
+import { underlordApi } from '@/lib/api';
 import { useEditorStore } from '@/stores/editorStore';
 import {
   Sparkles,
-  Play,
-  Check,
-  X,
+  Send,
   RotateCcw,
+  ChevronDown,
   ChevronRight,
   Loader2,
-  SkipForward,
+  Check,
+  X,
+  Zap,
 } from 'lucide-react';
 
-type Phase = 'idle' | 'planning' | 'executing' | 'done';
-type StepStatus = 'pending' | 'executing' | 'done' | 'failed' | 'skipped';
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-interface UIStep {
-  id: string;
-  type: string;
-  description: string;
-  checked: boolean;
+type StepStatus = 'pending' | 'running' | 'done' | 'failed';
+
+interface OperationStep {
+  name: string;
   status: StepStatus;
-  resultSummary?: string;
+  durationMs?: number;
 }
 
-const QUICK_ACTIONS = [
-  'Remove filler words and hesitations',
-  'Remove silences longer than 1 second',
-  'Trim the ending silence',
-  'Remove background noise and enhance audio',
-  'Generate captions',
-];
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status: 'streaming' | 'done' | 'error';
+  steps?: OperationStep[];
+  operationId?: string;
+  detailsOpen?: boolean;
+}
+
+type SSEEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'plan'; steps: string[] }
+  | { type: 'step_start'; name: string }
+  | { type: 'step_done'; name: string; durationMs: number }
+  | { type: 'done'; operationId: string }
+  | { type: 'error'; message: string };
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export function InteractiveWorkflowSidebar() {
   const { mediaFiles, duration } = useEditorStore();
-
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [prompt, setPrompt] = useState('');
-  const [isCreating, setIsCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [workflowId, setWorkflowId] = useState<string | null>(null);
-  const [steps, setSteps] = useState<UIStep[]>([]);
-  const [executingStepId, setExecutingStepId] = useState<string | null>(null);
-  const [lastDoneIndex, setLastDoneIndex] = useState<number>(-1);
-
   const mediaId = mediaFiles[0]?.id;
-  const mediaInfo = { duration: duration || 0, hasAudio: true };
 
-  // ── Execute steps (extracted so createWorkflow can call directly) ─
-  const runSteps = async (wfId: string, stepsToRun: UIStep[]) => {
-    setPhase('executing');
-    setLastDoneIndex(-1);
-    setSteps(prev => prev.map(s => (!s.checked ? { ...s, status: 'skipped' } : s)));
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-    for (let i = 0; i < stepsToRun.length; i++) {
-      if (!stepsToRun[i].checked) continue;
-
-      const stepId = stepsToRun[i].id;
-      setExecutingStepId(stepId);
-      setSteps(prev => prev.map((s, idx) => (idx === i ? { ...s, status: 'executing' } : s)));
-
-      try {
-        const execRes = await workflowApi.executeStep(wfId, stepId);
-        await workflowApi.confirmStep(wfId, stepId, true);
-
-        const payload = execRes.data?.data;
-        const summary =
-          payload?.result?.content ||
-          payload?.preview?.content ||
-          payload?.description ||
-          'Completed';
-
-        setSteps(prev =>
-          prev.map((s, idx) => (idx === i ? { ...s, status: 'done', resultSummary: String(summary) } : s))
-        );
-        setLastDoneIndex(i);
-      } catch (err: any) {
-        const msg = err.response?.data?.error || 'Step failed';
-        setSteps(prev =>
-          prev.map((s, idx) => (idx === i ? { ...s, status: 'failed', resultSummary: msg } : s))
-        );
-      }
+  // Auto-scroll to bottom on new content
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
+  }, [messages]);
 
-    setExecutingStepId(null);
-    setPhase('done');
-  };
-
-  // ── Create workflow ─────────────────────────────────────────────
-  const createWorkflow = async (text?: string, autoExecute = false) => {
-    const request = (text || prompt).trim();
-    if (!request || !mediaId) return;
-
-    setPrompt('');
-    setError(null);
-    setIsCreating(true);
-
-    try {
-      const res = await workflowApi.create(request, mediaId, mediaInfo);
-      const { workflowId: wfId, steps: rawSteps } = res.data.data;
-
-      const newSteps: UIStep[] = rawSteps.map((s: any) => ({
-        id: s.id,
-        type: s.type,
-        description: s.description,
-        checked: true,
-        status: 'pending' as StepStatus,
-      }));
-
-      setWorkflowId(wfId);
-      setSteps(newSteps);
-
-      if (autoExecute) {
-        // Execute directly with local variables, bypassing stale React state
-        await runSteps(wfId, newSteps);
-      } else {
-        setPhase('planning');
-      }
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to generate edit plan. Please try again.');
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  // ── Listen for auto-edit trigger from DescriptEditorNew ─────────
+  // ── Listen for auto-edit trigger from DescriptEditorNew ─────────────────
   useEffect(() => {
     const handler = (e: Event) => {
       const { request, failed } = (e as CustomEvent).detail;
       if (failed) {
-        setError('Transcription failed. Auto-edit cancelled.');
+        const errMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: 'Transcription failed. Auto-edit cancelled.',
+          status: 'error',
+        };
+        setMessages(prev => [...prev, errMsg]);
         return;
       }
       if (request && mediaId) {
-        createWorkflow(request, true);
+        sendMessage(request);
       }
     };
     window.addEventListener('auto-edit-request', handler);
     return () => window.removeEventListener('auto-edit-request', handler);
   }, [mediaId]); // re-bind when mediaId becomes available
 
-  // ── Step checkbox toggle ─────────────────────────────────────────
-  const toggleStep = (id: string) =>
-    setSteps(prev => prev.map(s => (s.id === id ? { ...s, checked: !s.checked } : s)));
+  // ── Send message ──────────────────────────────────────────────────────────
+  const sendMessage = async (text?: string) => {
+    const msgText = (text || input).trim();
+    if (!msgText || !mediaId || isStreaming) return;
 
-  const toggleAll = () => {
-    const allChecked = steps.every(s => s.checked);
-    setSteps(prev => prev.map(s => ({ ...s, checked: !allChecked })));
-  };
+    setInput('');
 
-  // ── Batch execute (manual) ───────────────────────────────────────
-  const executeAll = async () => {
-    if (!workflowId) return;
-    await runSteps(workflowId, steps);
-  };
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: msgText,
+      status: 'done',
+    };
 
-  // ── Undo last completed step ─────────────────────────────────────
-  const undoLast = async () => {
-    if (!workflowId || lastDoneIndex < 0) return;
+    const assistantId = crypto.randomUUID();
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      status: 'streaming',
+      steps: [],
+      detailsOpen: false,
+    };
+
+    setMessages(prev => [...prev, userMsg, assistantMsg]);
+    setIsStreaming(true);
+
     try {
-      await workflowApi.undo(workflowId);
-      const idx = lastDoneIndex;
-      setSteps(prev =>
-        prev.map((s, i) => (i === idx ? { ...s, status: 'pending', resultSummary: undefined } : s))
-      );
-      // Find the new last done index
-      setSteps(prev => {
-        const newLast = prev.reduce(
-          (acc, s, i) => (i < idx && s.status === 'done' ? i : acc),
-          -1
-        );
-        setLastDoneIndex(newLast);
-        return prev;
+      const response = await underlordApi.chat({
+        message: msgText,
+        mediaId,
+        mediaInfo: { duration: duration || 0, hasAudio: true },
+        conversationHistory: messages.map(m => ({ role: m.role, content: m.content })),
       });
-    } catch {
-      // silent — undo may not be supported for this step
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event: SSEEvent = JSON.parse(line.slice(6));
+            applySSEEvent(assistantId, event);
+          } catch {
+            // malformed JSON — skip
+          }
+        }
+      }
+    } catch (err: any) {
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === assistantId
+            ? { ...m, status: 'error', content: m.content || (err.message || 'Connection failed') }
+            : m
+        )
+      );
+    } finally {
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === assistantId && m.status === 'streaming' ? { ...m, status: 'done' } : m
+        )
+      );
+      setIsStreaming(false);
     }
   };
 
-  // ── Cancel mid-execution ─────────────────────────────────────────
-  const cancelWorkflow = async () => {
-    if (!workflowId) return;
-    try { await workflowApi.cancel(workflowId); } catch {}
-    reset();
+  // ── Apply SSE event to the in-progress assistant message ─────────────────
+  const applySSEEvent = (msgId: string, event: SSEEvent) => {
+    setMessages(prev =>
+      prev.map(m => {
+        if (m.id !== msgId) return m;
+        switch (event.type) {
+          case 'text':
+            return { ...m, content: m.content + event.delta };
+          case 'plan':
+            return {
+              ...m,
+              steps: event.steps.map(name => ({ name, status: 'pending' as StepStatus })),
+            };
+          case 'step_start':
+            return {
+              ...m,
+              steps: m.steps?.map(s => s.name === event.name ? { ...s, status: 'running' as StepStatus } : s),
+            };
+          case 'step_done':
+            return {
+              ...m,
+              steps: m.steps?.map(s =>
+                s.name === event.name ? { ...s, status: 'done' as StepStatus, durationMs: event.durationMs } : s
+              ),
+            };
+          case 'done':
+            return { ...m, status: 'done', operationId: event.operationId || undefined };
+          case 'error':
+            return { ...m, status: 'error', content: m.content + (m.content ? '\n' : '') + event.message };
+          default:
+            return m;
+        }
+      })
+    );
   };
 
-  // ── Reset to idle ────────────────────────────────────────────────
-  const reset = () => {
-    setPhase('idle');
-    setWorkflowId(null);
-    setSteps([]);
-    setError(null);
-    setPrompt('');
-    setExecutingStepId(null);
-    setLastDoneIndex(-1);
+  // ── Toggle Details section ────────────────────────────────────────────────
+  const toggleDetails = (msgId: string) => {
+    setMessages(prev =>
+      prev.map(m => m.id === msgId ? { ...m, detailsOpen: !m.detailsOpen } : m)
+    );
   };
 
-  const checkedCount = steps.filter(s => s.checked).length;
-  const allChecked = steps.length > 0 && steps.every(s => s.checked);
+  // ── Revert ────────────────────────────────────────────────────────────────
+  const handleRevert = async (operationId: string, msgId: string) => {
+    try {
+      await underlordApi.revert(operationId);
+      setMessages(prev =>
+        prev.map(m => m.id === msgId ? { ...m, operationId: undefined } : m)
+      );
+    } catch {
+      // silent
+    }
+  };
 
   return (
     <div className="flex flex-col h-full bg-[#161616]">
       {/* ── Header ── */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2a] flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-            <Sparkles className="w-3.5 h-3.5 text-white" />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-white leading-none">Underlord</h3>
-            <p className="text-[10px] text-gray-500 mt-0.5">AI Video Editor</p>
-          </div>
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-[#2a2a2a] flex-shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
+          <Sparkles className="w-3.5 h-3.5 text-white" />
         </div>
-        {(phase === 'planning' || phase === 'executing') && (
-          <button
-            onClick={phase === 'executing' ? cancelWorkflow : reset}
-            className="text-xs text-gray-500 hover:text-gray-300 transition"
-          >
-            {phase === 'executing' ? 'Cancel' : 'New edit'}
-          </button>
-        )}
+        <div>
+          <h3 className="text-sm font-semibold text-white leading-none">Underlord</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">AI Video Editor</p>
+        </div>
       </div>
 
-      {/* ── Scrollable body ── */}
-      <div className="flex-1 overflow-y-auto">
-
-        {/* === IDLE === */}
-        {phase === 'idle' && (
-          <div className="p-3 space-y-2">
-            {!mediaId && (
-              <div className="px-3 py-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-                <p className="text-xs text-yellow-400">Upload a video first to start editing.</p>
-              </div>
-            )}
-            <p className="text-xs text-gray-600 px-1 pb-1">Quick actions</p>
-            {QUICK_ACTIONS.map((action, i) => (
-              <button
-                key={i}
-                onClick={() => createWorkflow(action)}
-                disabled={isCreating || !mediaId}
-                className="w-full text-left px-3 py-2.5 bg-[#1c1c1c] hover:bg-[#252525] border border-[#2a2a2a] hover:border-[#7c3aed]/40 rounded-lg text-xs text-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {action}
-              </button>
-            ))}
-            {error && <p className="text-xs text-red-400 px-1 pt-1">{error}</p>}
-          </div>
-        )}
-
-        {/* === PLANNING === */}
-        {phase === 'planning' && (
-          <div className="p-3 space-y-2">
-            <div className="flex items-center justify-between px-1 pb-1">
-              <p className="text-xs text-gray-500">Edit plan — {steps.length} steps</p>
-              <button
-                onClick={toggleAll}
-                className="text-xs text-[#7c3aed] hover:text-purple-300 transition"
-              >
-                {allChecked ? 'Deselect all' : 'Select all'}
-              </button>
+      {/* ── Message list ── */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-4">
+        {messages.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-center gap-3 py-8">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center">
+              <Zap className="w-5 h-5 text-purple-400" />
             </div>
-            {steps.map(step => (
-              <button
-                key={step.id}
-                onClick={() => toggleStep(step.id)}
-                className="w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg border border-[#2a2a2a] hover:border-[#7c3aed]/40 bg-[#1c1c1c] hover:bg-[#252525] transition text-left"
-              >
-                <div
-                  className={`mt-0.5 w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition ${
-                    step.checked
-                      ? 'bg-[#7c3aed] border-[#7c3aed]'
-                      : 'border-gray-600 bg-transparent'
-                  }`}
-                >
-                  {step.checked && <Check className="w-2.5 h-2.5 text-white" />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-200 leading-snug">{step.description}</p>
-                  <p className="text-[10px] text-gray-600 mt-0.5 capitalize">
-                    {step.type.replace(/_/g, ' ')}
-                  </p>
-                </div>
-              </button>
-            ))}
+            <p className="text-xs text-gray-500 max-w-[180px]">
+              Ask Underlord to edit your video — remove fillers, trim silence, enhance audio, and more.
+            </p>
           </div>
         )}
 
-        {/* === EXECUTING / DONE === */}
-        {(phase === 'executing' || phase === 'done') && (
-          <div className="p-3 space-y-2">
-            <p className="text-xs text-gray-500 px-1 pb-1">
-              {phase === 'executing' ? 'Running edits...' : 'Results'}
-            </p>
-            {steps.map((step, i) => (
-              <div
-                key={step.id}
-                className="px-3 py-2.5 rounded-lg border border-[#2a2a2a] bg-[#1c1c1c]"
-              >
-                <div className="flex items-center gap-2">
-                  {/* Status icon */}
-                  <StatusIcon status={step.status} />
-                  <p className="flex-1 text-xs text-gray-300 leading-snug">{step.description}</p>
-                  {/* Undo — only on the last done step, after execution */}
-                  {phase === 'done' && step.status === 'done' && i === lastDoneIndex && (
-                    <button
-                      onClick={undoLast}
-                      className="flex-shrink-0 flex items-center gap-1 text-[10px] text-gray-600 hover:text-purple-400 transition"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      Undo
-                    </button>
+        {messages.map(msg => (
+          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            {msg.role === 'user' ? (
+              // User bubble
+              <div className="max-w-[85%] px-3 py-2 bg-[#7c3aed] rounded-2xl rounded-tr-sm">
+                <p className="text-xs text-white leading-relaxed">{msg.content}</p>
+              </div>
+            ) : (
+              // Assistant message
+              <div className="max-w-[95%] space-y-2">
+                {/* Text content */}
+                <div className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">
+                  {msg.content}
+                  {msg.status === 'streaming' && !msg.content && (
+                    <span className="inline-flex gap-0.5 items-center">
+                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </span>
+                  )}
+                  {msg.status === 'streaming' && msg.content && (
+                    <span className="inline-block w-0.5 h-3.5 bg-purple-400 animate-pulse ml-0.5 align-middle" />
                   )}
                 </div>
-                {step.resultSummary && (
-                  <p
-                    className={`mt-1 text-[10px] pl-5 ${
-                      step.status === 'failed'
-                        ? 'text-red-400'
-                        : step.status === 'skipped'
-                        ? 'text-gray-600'
-                        : 'text-gray-500'
-                    }`}
+
+                {/* Details collapsible */}
+                {msg.steps && msg.steps.length > 0 && (
+                  <div className="border border-[#2a2a2a] rounded-lg overflow-hidden">
+                    <button
+                      onClick={() => toggleDetails(msg.id)}
+                      className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-gray-500 hover:text-gray-300 hover:bg-[#1c1c1c] transition"
+                    >
+                      {msg.detailsOpen
+                        ? <ChevronDown className="w-3 h-3" />
+                        : <ChevronRight className="w-3 h-3" />}
+                      Details
+                    </button>
+                    {msg.detailsOpen && (
+                      <div className="border-t border-[#2a2a2a] divide-y divide-[#222]">
+                        {msg.steps.map((step, i) => (
+                          <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                            <StepIcon status={step.status} />
+                            <span className="flex-1 text-[11px] text-gray-400">{step.name}</span>
+                            {step.durationMs !== undefined && (
+                              <span className="text-[10px] text-gray-600">
+                                {step.durationMs < 1000
+                                  ? `${step.durationMs}ms`
+                                  : `${(step.durationMs / 1000).toFixed(1)}s`}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Revert button */}
+                {msg.status === 'done' && msg.operationId && (
+                  <button
+                    onClick={() => handleRevert(msg.operationId!, msg.id)}
+                    className="flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-purple-400 transition"
+                    aria-label="Revert"
                   >
-                    {step.resultSummary}
-                  </p>
+                    <RotateCcw className="w-3 h-3" />
+                    Revert
+                  </button>
                 )}
               </div>
-            ))}
+            )}
           </div>
-        )}
+        ))}
       </div>
 
-      {/* ── Footer / action bar ── */}
+      {/* ── Input bar ── */}
       <div className="border-t border-[#2a2a2a] p-3 flex-shrink-0">
-        {phase === 'idle' && (
-          <div className="flex gap-2">
-            <input
-              value={prompt}
-              onChange={e => setPrompt(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && !isCreating && createWorkflow()}
-              placeholder="Describe your edit..."
-              disabled={isCreating || !mediaId}
-              className="flex-1 bg-[#1c1c1c] border border-[#2a2a2a] rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-[#7c3aed]/50 disabled:opacity-40"
-            />
-            <button
-              onClick={() => createWorkflow()}
-              disabled={isCreating || !prompt.trim() || !mediaId}
-              className="px-3 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white rounded-lg text-xs font-medium transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center"
-            >
-              {isCreating ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <ChevronRight className="w-3.5 h-3.5" />
-              )}
-            </button>
-          </div>
+        {!mediaId && (
+          <p className="text-[11px] text-yellow-500/70 mb-2 px-1">Upload a video first to start editing.</p>
         )}
-
-        {phase === 'planning' && (
+        <div className="flex gap-2">
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !isStreaming && sendMessage()}
+            placeholder="Ask Underlord"
+            disabled={isStreaming || !mediaId}
+            className="flex-1 bg-[#1c1c1c] border border-[#2a2a2a] rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-[#7c3aed]/50 disabled:opacity-40"
+          />
           <button
-            onClick={executeAll}
-            disabled={checkedCount === 0}
-            className="w-full py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white rounded-lg text-xs font-semibold transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            onClick={() => sendMessage()}
+            disabled={isStreaming || !input.trim() || !mediaId}
+            aria-label="Send"
+            className="px-2.5 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] text-white rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center"
           >
-            <Play className="w-3 h-3" />
-            Execute {checkedCount} step{checkedCount !== 1 ? 's' : ''}
+            {isStreaming
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Send className="w-3.5 h-3.5" />}
           </button>
-        )}
-
-        {phase === 'executing' && (
-          <button
-            onClick={cancelWorkflow}
-            className="w-full py-2 bg-[#252525] hover:bg-red-900/30 text-gray-400 hover:text-red-400 rounded-lg text-xs font-medium transition border border-[#333]"
-          >
-            Cancel
-          </button>
-        )}
-
-        {phase === 'done' && (
-          <button
-            onClick={reset}
-            className="w-full py-2 bg-[#252525] hover:bg-[#2a2a2a] text-gray-300 rounded-lg text-xs font-medium transition border border-[#333]"
-          >
-            New edit
-          </button>
-        )}
+        </div>
+        <p className="text-[10px] text-gray-700 mt-1.5 px-1">Underlord can make mistakes.</p>
       </div>
     </div>
   );
 }
 
-// ── Status icon helper ────────────────────────────────────────────────────────
-function StatusIcon({ status }: { status: StepStatus }) {
-  if (status === 'executing') {
-    return <Loader2 className="w-3.5 h-3.5 text-purple-400 animate-spin flex-shrink-0" />;
+// ── Step status icon ───────────────────────────────────────────────────────────
+
+function StepIcon({ status }: { status: StepStatus }) {
+  if (status === 'running') {
+    return <Loader2 className="w-3 h-3 text-purple-400 animate-spin flex-shrink-0" />;
   }
   if (status === 'done') {
     return (
-      <div className="w-3.5 h-3.5 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
+      <div className="w-3 h-3 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
         <Check className="w-2 h-2 text-green-400" />
       </div>
     );
   }
   if (status === 'failed') {
     return (
-      <div className="w-3.5 h-3.5 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0">
+      <div className="w-3 h-3 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0">
         <X className="w-2 h-2 text-red-400" />
       </div>
     );
   }
-  if (status === 'skipped') {
-    return <SkipForward className="w-3.5 h-3.5 text-gray-600 flex-shrink-0" />;
-  }
-  // pending
-  return <div className="w-3.5 h-3.5 rounded-full bg-[#2a2a2a] border border-[#444] flex-shrink-0" />;
+  return <div className="w-3 h-3 rounded-full bg-[#2a2a2a] border border-[#444] flex-shrink-0" />;
 }

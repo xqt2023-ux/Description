@@ -282,6 +282,23 @@ export const workflowApi = {
   delete: (workflowId: string) => api.delete(`/ai/workflow/${workflowId}`),
 };
 
+// Underlord chat API (SSE streaming)
+export const underlordApi = {
+  chat: (params: {
+    message: string;
+    mediaId: string;
+    mediaInfo: { duration: number; hasAudio: boolean };
+    conversationHistory: { role: 'user' | 'assistant'; content: string }[];
+  }): Promise<Response> => {
+    return fetch(`${API_BASE_URL}/api/ai/underlord`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  },
+  revert: (operationId: string) => api.post(`/ai/underlord/revert/${operationId}`),
+};
+
 // Direct file download helper
 export const downloadEditedVideo = (filename: string): string => {
   return `${API_BASE_URL}/api/export/download/${filename}`;

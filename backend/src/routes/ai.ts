@@ -45,6 +45,7 @@ import {
   getAllWorkflows,
   deleteWorkflow,
 } from '../services/interactiveEditWorkflow';
+import { chat as underlordChat } from '../services/underlordService';
 import { getMediaById } from './media';
 
 const router = Router();
@@ -940,5 +941,70 @@ router.delete('/workflow/:workflowId', (req: Request, res: Response) => {
   }
 });
 
+
+// ============ Underlord SSE Chat API ============
+
+/**
+ * POST /api/ai/underlord
+ * Streaming chat endpoint — returns Server-Sent Events
+ */
+router.post('/underlord', async (req: Request, res: Response) => {
+  const { message, mediaId, mediaInfo, conversationHistory } = req.body;
+
+  if (!message || !mediaId) {
+    return res.status(400).json({ success: false, error: 'message and mediaId are required' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  // Resolve media file path
+  const media = getMediaById(mediaId);
+  let mediaFilePath: string | undefined;
+  if (media?.url) {
+    const urlPath = (media.url as string)
+      .replace(/^https?:\/\/[^/]+/, '')
+      .replace(/^\//, '');
+    const candidate = require('path').join(process.cwd(), urlPath);
+    if (require('fs').existsSync(candidate)) mediaFilePath = candidate;
+  }
+
+  const emit = (event: any) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  try {
+    await underlordChat(
+      { message, mediaId, mediaInfo, conversationHistory, mediaFilePath },
+      emit
+    );
+  } catch (err: any) {
+    emit({ type: 'error', message: err.message || 'Internal error' });
+  }
+
+  res.end();
+});
+
+/**
+ * POST /api/ai/underlord/revert/:operationId
+ * Revert the last operation performed by a workflow
+ */
+router.post('/underlord/revert/:operationId', async (req: Request, res: Response) => {
+  try {
+    const { operationId } = req.params;
+    const result = await undoStep(operationId);
+
+    res.json({
+      success: result.success,
+      data: result.success ? { message: result.message } : undefined,
+      error: result.success ? undefined : result.message,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Revert failed' });
+  }
+});
 
 export { router as aiRoutes };
