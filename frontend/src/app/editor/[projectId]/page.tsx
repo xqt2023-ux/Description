@@ -15,6 +15,14 @@ function EditorContent() {
   
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [isWaitingForFile, setIsWaitingForFile] = useState(hasFile);
+
+  // 读取自动编辑需求，读完立刻清除避免刷新后重复执行
+  const [autoEditRequest] = useState<string | undefined>(() => {
+    if (typeof window === 'undefined') return undefined;
+    const req = sessionStorage.getItem('pendingAutoEdit') || undefined;
+    sessionStorage.removeItem('pendingAutoEdit');
+    return req;
+  });
   
   // 从首页获取待处理的文件
   useEffect(() => {
@@ -38,13 +46,14 @@ function EditorContent() {
   }, [hasFile]);
 
   return (
-    <DescriptEditor 
-      projectId={projectId} 
-      initialMediaId={mediaId} 
+    <DescriptEditor
+      projectId={projectId}
+      initialMediaId={mediaId}
       initialMediaUrl={mediaUrl}
       initialTranscriptionId={transcriptionId}
       pendingFile={pendingFile}
       isWaitingForFile={isWaitingForFile}
+      autoEditRequest={autoEditRequest}
     />
   );
 }

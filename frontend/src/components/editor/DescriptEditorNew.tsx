@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditorStore } from '@/stores/editorStore';
 import { transcriptionApi, mediaApi, getUploadUrl } from '@/lib/api';
+import { InteractiveWorkflowSidebar } from './InteractiveWorkflowSidebar';
 import Link from 'next/link';
 import {
   Play,
@@ -62,6 +63,7 @@ interface DescriptEditorProps {
   initialTranscriptionId?: string;
   pendingFile?: File | null;
   isWaitingForFile?: boolean;
+  autoEditRequest?: string;
 }
 
 // 处理状态类型
@@ -73,7 +75,7 @@ interface ProcessingStatus {
   transcriptionProgress: number;
 }
 
-export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, initialTranscriptionId, pendingFile, isWaitingForFile }: DescriptEditorProps) {
+export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, initialTranscriptionId, pendingFile, isWaitingForFile, autoEditRequest }: DescriptEditorProps) {
   const [rightPanel, setRightPanel] = useState<'underlord' | 'project' | 'ai-tools' | 'properties' | 'elements' | 'captions' | 'media'>('underlord');
   const [showExportModal, setShowExportModal] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -88,7 +90,9 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
     transcriptionProgress: 0,
   });
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [projectTitle, setProjectTitle] = useState('Untitled Project');
+  const [activityCollapsed, setActivityCollapsed] = useState(false);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [canvasMode, setCanvasMode] = useState<'layout' | 'background'>('layout');
   const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
@@ -104,8 +108,11 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const autoEditExecuted = useRef(false);
+  const pendingAutoEditRef = useRef<string | undefined>(autoEditRequest);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const [audioData, setAudioData] = useState<number[]>([]);
+  const [videoAspect, setVideoAspect] = useState<'landscape' | 'portrait' | 'square'>('landscape');
   
   const {
     projectName,
@@ -125,11 +132,39 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
     setVideoUrl,
     setTranscript,
     setTranscriptionStatus,
+    updateTranscript,
     tracks,
+    mediaFiles,
     addMediaFile,
     addTrack,
     seekTo,
   } = useEditorStore();
+
+  // ── Speaker label state ────────────────────────────────────────
+  const [speakerPopoverSegId, setSpeakerPopoverSegId] = useState<string | null>(null);
+  const [newSpeakerName, setNewSpeakerName] = useState('');
+  const [isAddingNewSpeaker, setIsAddingNewSpeaker] = useState(false);
+  const speakerPopoverRef = useRef<HTMLDivElement>(null);
+
+  const SPEAKER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#DDA0DD', '#F7DC6F', '#FAB1A0', '#74B9FF'];
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (speakerPopoverRef.current && !speakerPopoverRef.current.contains(e.target as Node)) {
+        setSpeakerPopoverSegId(null);
+        setIsAddingNewSpeaker(false);
+        setNewSpeakerName('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Reset video playback state on mount to prevent stale state from previous sessions
+  useEffect(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+  }, []);
 
   // Handle user-initiated seeks
   useEffect(() => {
@@ -153,6 +188,91 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       processFileFromHomepage(pendingFile);
     }
   }, [pendingFile]);
+
+  // Initialize video from URL when opening an existing project
+  useEffect(() => {
+    if (initialMediaUrl && !videoUrl) {
+      const fullUrl = getUploadUrl(initialMediaUrl);
+      setVideoUrl(fullUrl);
+      // Ensure mediaFiles is populated so the Underlord sidebar can find the mediaId
+      if (initialMediaId && mediaFiles.length === 0) {
+        addMediaFile({
+          id: initialMediaId,
+          name: initialMediaUrl.split('/').pop() || 'video',
+          type: 'video',
+          url: initialMediaUrl,
+          duration: 0,
+          size: 0,
+          thumbnails: [],
+        });
+      }
+    }
+  }, [initialMediaUrl]);
+
+  // Load transcription when transcription ID is provided (explicit)
+  useEffect(() => {
+    if (!initialTranscriptionId || transcript) return;
+    transcriptionApi.getById(initialTranscriptionId).then(response => {
+      const data = response.data.data;
+      if (data.status === 'completed' && data.segments) {
+        setTranscript({
+          id: initialTranscriptionId,
+          mediaId: data.mediaId || '',
+          language: data.language || 'en',
+          segments: data.segments || [],
+          createdAt: data.createdAt,
+          updatedAt: data.updatedAt,
+        });
+      }
+    }).catch(console.error);
+  }, [initialTranscriptionId]);
+
+  // Load transcription by mediaId when opening existing project
+  useEffect(() => {
+    if (!initialMediaId || transcript || initialTranscriptionId) return;
+    // Look up transcription for this media file
+    transcriptionApi.getByMediaId(initialMediaId).then(response => {
+      const data = response.data.data;
+      if (data && data.status === 'completed' && data.segments) {
+        setProjectTitle(data.mediaName || projectTitle);
+        setTranscript({
+          id: data.id,
+          mediaId: initialMediaId,
+          language: data.language || 'en',
+          segments: data.segments || [],
+          createdAt: data.createdAt,
+          updatedAt: data.updatedAt,
+        });
+      }
+    }).catch(() => {
+      // No transcription found - that's okay
+    });
+  }, [initialMediaId]);
+
+  // 转录完成后自动执行编辑需求
+  useEffect(() => {
+    const request = pendingAutoEditRef.current;
+    if (!request) return;
+    if (processingStatus.transcription !== 'completed') return;
+    if (autoEditExecuted.current) return;
+
+    autoEditExecuted.current = true;
+    setRightPanel('underlord');
+
+    // 通知 InteractiveWorkflowSidebar 自动执行
+    (window as any).__autoEditRequest = request;
+    window.dispatchEvent(new CustomEvent('auto-edit-request', { detail: { request } }));
+  }, [processingStatus.transcription]);
+
+  // 转录失败时取消自动编辑
+  useEffect(() => {
+    if (processingStatus.transcription !== 'error') return;
+    if (!pendingAutoEditRef.current || autoEditExecuted.current) return;
+
+    autoEditExecuted.current = true;
+    setRightPanel('underlord');
+    window.dispatchEvent(new CustomEvent('auto-edit-request', { detail: { request: null, failed: true } }));
+  }, [processingStatus.transcription]);
 
   // Process file: upload -> audio extract -> transcribe
   const processFileFromHomepage = async (file: File) => {
@@ -333,16 +453,16 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
   };
 
   // Video controls
-  const togglePlay = () => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.pause();
-      } else {
-        videoRef.current.play();
-      }
-      setIsPlaying(!isPlaying);
+  const togglePlay = useCallback(() => {
+    if (!videoRef.current) return;
+    if (videoRef.current.paused) {
+      videoRef.current.play().catch((error) => {
+        console.error('Video play error:', error);
+      });
+    } else {
+      videoRef.current.pause();
     }
-  };
+  }, []);
 
   const handleTimeUpdate = () => {
     if (videoRef.current) {
@@ -353,6 +473,19 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
       setDuration(videoRef.current.duration);
+      // Detect video orientation for container sizing
+      const w = videoRef.current.videoWidth;
+      const h = videoRef.current.videoHeight;
+      if (w > 0 && h > 0) {
+        const ratio = w / h;
+        if (ratio > 1.1) setVideoAspect('landscape');
+        else if (ratio < 0.9) setVideoAspect('portrait');
+        else setVideoAspect('square');
+      }
+      // Seek slightly past 0 to force first frame to render
+      if (videoRef.current.currentTime === 0) {
+        videoRef.current.currentTime = 0.001;
+      }
     }
   };
 
@@ -428,14 +561,35 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
         e.preventDefault();
         handleSplit();
       }
-      
+
       // Space bar for play/pause
       if (e.key === ' ') {
         e.preventDefault();
         togglePlay();
       }
+
+      // Playback speed shortcuts (Shift+J/K/L)
+      const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3];
+      if (e.shiftKey && e.key === 'J') {
+        e.preventDefault();
+        setPlaybackSpeed(prev => {
+          const idx = SPEEDS.indexOf(prev);
+          return idx > 0 ? SPEEDS[idx - 1] : prev;
+        });
+      }
+      if (e.shiftKey && e.key === 'K') {
+        e.preventDefault();
+        setPlaybackSpeed(1);
+      }
+      if (e.shiftKey && e.key === 'L') {
+        e.preventDefault();
+        setPlaybackSpeed(prev => {
+          const idx = SPEEDS.indexOf(prev);
+          return idx < SPEEDS.length - 1 ? SPEEDS[idx + 1] : prev;
+        });
+      }
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleSplit, togglePlay]);
@@ -598,10 +752,18 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
 
         {/* Right actions */}
         <div className="flex items-center gap-2">
+          <button className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-400 hover:bg-[#2a2a2a] rounded-lg transition border border-[#2a2a2a]">
+            <Sparkles className="w-3 h-3 text-yellow-400" />
+            <span>150 credits</span>
+          </button>
+          <button className="px-3 py-1.5 text-xs font-medium text-[#7c3aed] hover:bg-[#7c3aed]/10 rounded-lg border border-[#7c3aed]/40 transition">
+            Upgrade
+          </button>
+          <div className="h-4 w-px bg-[#2a2a2a] mx-1" />
           <button className="p-1.5 hover:bg-[#2a2a2a] rounded transition text-gray-400">
             <Share2 className="w-4 h-4" />
           </button>
-          <button 
+          <button
             onClick={() => setShowExportModal(true)}
             className="bg-[#7c3aed] hover:bg-[#6d28d9] px-3 py-1.5 rounded text-sm font-medium transition"
           >
@@ -622,127 +784,305 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Script */}
-        <aside className="w-80 bg-[#1e1e1e] border-r border-[#2a2a2a] flex flex-col flex-shrink-0">
+        <aside className="w-[420px] bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
           {/* Script Header */}
-          <div className="p-3 border-b border-[#2a2a2a]">
-            <div className="flex items-center justify-between mb-3">
-              <button className="flex items-center gap-1 px-2 py-1 text-sm text-gray-400 hover:bg-[#2a2a2a] rounded transition">
+          <div className="border-b border-gray-100">
+            {/* Mode tabs */}
+            <div className="flex items-center px-3 pt-2 gap-0.5">
+              <button className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-800 bg-gray-100 rounded-md font-medium">
                 <Edit3 className="w-3 h-3" />
-                Write
+                Script
               </button>
-              <button className="p-1.5 hover:bg-[#2a2a2a] rounded transition text-gray-400">
-                <Copy className="w-4 h-4" />
+              <button className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-md transition">
+                <FileText className="w-3 h-3" />
+                Transcript
               </button>
             </div>
-            
-            {/* Project Title in Script */}
-            <h2 className="text-lg font-semibold text-white mb-3">{projectTitle}</h2>
-            
-            {/* Add Speaker Button */}
-            <button className="flex items-center gap-2 px-3 py-2 text-sm text-[#7c3aed] hover:bg-[#7c3aed]/10 rounded-lg transition w-full">
-              <User className="w-4 h-4" />
-              Add speaker
-            </button>
+
+            {/* Project Title */}
+            <div className="px-4 py-3">
+              <h2 className="text-base font-semibold text-gray-900 leading-snug">{projectTitle}</h2>
+            </div>
+
+            {/* Speakers summary (if any assigned) */}
+            {(transcript?.speakers?.length ?? 0) > 0 && (
+              <div className="px-4 pb-3 flex flex-wrap gap-1.5">
+                {transcript!.speakers!.map(sp => (
+                  <span
+                    key={sp.id}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
+                    style={{ backgroundColor: (sp.color || '#888') + '18', color: sp.color || '#888' }}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: sp.color || '#888' }} />
+                    {sp.customName || sp.label}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Processing Status (T021 - with retry support) */}
-          {showProcessingPanel && (
-            <div className="p-4 border-b border-[#2a2a2a] bg-[#252525]">
-              <div className="text-sm text-gray-300 mb-3 font-medium">
-                {processingStatus.upload === 'error' || processingStatus.transcription === 'error' 
-                  ? 'Processing failed'
-                  : 'Processing...'}
-              </div>
-              
-              <div className="space-y-2">
-                <ProcessingStep 
-                  label="Upload" 
-                  status={processingStatus.upload} 
-                  progress={processingStatus.uploadProgress}
-                  error={uploadError || undefined}
-                  onRetry={processingStatus.upload === 'error' ? handleRetryUpload : undefined}
-                />
-                <ProcessingStep 
-                  label="Audio Extract" 
-                  status={processingStatus.audioExtract}
-                />
-                <ProcessingStep 
-                  label="Transcription" 
-                  status={processingStatus.transcription} 
-                  progress={processingStatus.transcriptionProgress}
-                  error={transcriptionError || transcriptionStatus?.error}
-                  onRetry={processingStatus.transcription === 'error' ? handleRetryTranscription : undefined}
-                />
-              </div>
+          {/* Error banner only */}
+          {showProcessingPanel && (processingStatus.upload === 'error' || processingStatus.transcription === 'error') && (
+            <div className="px-4 py-3 border-b border-red-100 bg-red-50 flex items-center justify-between">
+              <p className="text-sm text-red-600">
+                {processingStatus.upload === 'error' ? (uploadError || 'Upload failed') : (transcriptionError || transcriptionStatus?.error || 'Transcription failed')}
+              </p>
+              <button
+                onClick={processingStatus.upload === 'error' ? handleRetryUpload : handleRetryTranscription}
+                className="text-xs text-red-600 underline ml-3 flex-shrink-0"
+              >
+                Retry
+              </button>
             </div>
           )}
 
           {/* Script Content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {transcriptionStatus?.status === 'processing' && !transcript && (
-              <div className="flex items-center justify-center h-32">
-                <div className="text-center">
-                  <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#7c3aed]" />
-                  <p className="text-sm text-gray-400">Transcribing audio...</p>
+          <div className="flex-1 overflow-y-auto px-8 py-6">
+            {(showProcessingPanel || isWaitingForFile || (transcriptionStatus?.status === 'processing')) && !transcript && (
+              <div className="py-2">
+                {/* Video thumbnail */}
+                <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-100 mb-4">
+                  {videoUrl
+                    ? <video src={videoUrl} className="w-full h-full object-cover" muted preload="metadata" />
+                    : <div className="w-full h-full flex items-center justify-center bg-gray-200"><Video className="w-5 h-5 text-gray-400" /></div>
+                  }
+                </div>
+                {/* File row — circular progress + name + status */}
+                <div className="flex items-center gap-3 border-t border-gray-100 pt-3">
+                  <svg className="w-5 h-5 flex-shrink-0 -rotate-90" viewBox="0 0 20 20">
+                    <circle cx="10" cy="10" r="7.5" fill="none" stroke="#e5e7eb" strokeWidth="2" />
+                    <circle
+                      cx="10" cy="10" r="7.5"
+                      fill="none" stroke="#9ca3af" strokeWidth="2"
+                      strokeDasharray={`${2 * Math.PI * 7.5}`}
+                      strokeDashoffset={`${2 * Math.PI * 7.5 * (1 - (
+                        processingStatus.transcription === 'processing' ? processingStatus.transcriptionProgress
+                        : processingStatus.upload === 'processing' ? processingStatus.uploadProgress
+                        : 0
+                      ) / 100)}`}
+                      strokeLinecap="round"
+                      className="transition-all duration-300"
+                    />
+                  </svg>
+                  <span className="flex-1 text-sm text-gray-700 truncate">
+                    {pendingFile?.name || projectTitle}
+                  </span>
+                  <span className="text-sm text-gray-400 flex-shrink-0">
+                    {processingStatus.transcription === 'processing'
+                      ? `Transcribing... ${processingStatus.transcriptionProgress}%`
+                      : processingStatus.audioExtract === 'processing'
+                      ? 'Extracting audio...'
+                      : processingStatus.upload === 'processing'
+                      ? `Uploading... ${processingStatus.uploadProgress}%`
+                      : isWaitingForFile
+                      ? 'Waiting...'
+                      : 'Processing...'}
+                  </span>
                 </div>
               </div>
             )}
 
-            {transcript?.segments && transcript.segments.length > 0 && (
-              <div className="text-sm leading-relaxed">
-                {transcript.segments.map((segment, segmentIndex) => (
-                  <p key={segmentIndex} className="mb-4">
-                    {segment.words ? (
-                      segment.words.map((word, wordIndex) => {
-                        const isCurrentWord = 
-                          currentWordPosition && 
-                          currentWordPosition.segmentIndex === segmentIndex && 
-                          currentWordPosition.wordIndex === wordIndex;
-                        
-                        return (
-                          <span
-                            key={wordIndex}
-                            onClick={() => seekTo(word.startTime)}
-                            className={`cursor-pointer transition-all duration-100 ${
-                              isCurrentWord 
-                                ? 'bg-[#3b82f6] text-white px-0.5 rounded' 
-                                : 'hover:bg-[#2a2a2a] text-gray-300'
-                            }`}
-                          >
-                            {word.text}{' '}
-                          </span>
-                        );
-                      })
-                    ) : (
-                      <span className="text-gray-300">{segment.text}</span>
-                    )}
-                  </p>
-                ))}
-              </div>
-            )}
+            {transcript?.segments && transcript.segments.length > 0 && (() => {
+              // Group consecutive same-speaker segments into display paragraphs
+              type SegGroup = { segments: typeof transcript.segments; globalStartIdx: number };
+              const groups: SegGroup[] = [];
+              let cur: SegGroup = { segments: [transcript.segments[0]], globalStartIdx: 0 };
+              for (let i = 1; i < transcript.segments.length; i++) {
+                const prev = transcript.segments[i - 1];
+                const seg = transcript.segments[i];
+                const sameSpeaker = prev.speakerId === seg.speakerId;
+                const gap = seg.startTime - prev.endTime;
+                if (sameSpeaker && gap < 3) {
+                  cur.segments.push(seg);
+                } else {
+                  groups.push(cur);
+                  cur = { segments: [seg], globalStartIdx: i };
+                }
+              }
+              groups.push(cur);
+
+              return (
+                <div>
+                  {groups.map((group, groupIndex) => {
+                    const firstSeg = group.segments[0];
+                    const speaker = transcript.speakers?.find(sp => sp.id === firstSeg.speakerId);
+                    const isPopoverOpen = speakerPopoverSegId === firstSeg.id;
+
+                    return (
+                      <div key={groupIndex} className="mb-8 group">
+
+                        {/* ── Speaker label ── */}
+                        <div className="flex items-center gap-2 mb-1.5 relative">
+                          {speaker ? (
+                            <button
+                              onClick={() => { setSpeakerPopoverSegId(isPopoverOpen ? null : firstSeg.id); setIsAddingNewSpeaker(false); setNewSpeakerName(''); }}
+                              className="text-[13px] font-semibold hover:opacity-70 transition"
+                              style={{ color: speaker.color || '#888' }}
+                            >
+                              {speaker.customName || speaker.label}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => { setSpeakerPopoverSegId(isPopoverOpen ? null : firstSeg.id); setIsAddingNewSpeaker(false); setNewSpeakerName(''); }}
+                              className="text-[12px] text-gray-400 hover:text-gray-600 transition font-medium opacity-0 group-hover:opacity-100"
+                            >
+                              Add speaker
+                            </button>
+                          )}
+
+                          {/* Speaker popover */}
+                          {isPopoverOpen && (
+                            <div
+                              ref={speakerPopoverRef}
+                              className="absolute left-0 top-6 z-30 bg-white border border-gray-200 rounded-xl shadow-xl w-52 overflow-hidden"
+                            >
+                              {(transcript.speakers || []).length > 0 && (
+                                <div className="py-1 border-b border-gray-100">
+                                  {transcript.speakers!.map(sp => (
+                                    <button
+                                      key={sp.id}
+                                      onClick={() => {
+                                        updateTranscript({ ...transcript, segments: transcript.segments.map(s => group.segments.some(gs => gs.id === s.id) ? { ...s, speakerId: sp.id, speakerName: sp.customName || sp.label } : s) });
+                                        setSpeakerPopoverSegId(null);
+                                      }}
+                                      className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 transition text-left"
+                                    >
+                                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: sp.color || '#888' }} />
+                                      <span className="flex-1 text-xs text-gray-700 truncate">{sp.customName || sp.label}</span>
+                                      {firstSeg.speakerId === sp.id && <span className="text-green-500 text-xs">✓</span>}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              {isAddingNewSpeaker ? (
+                                <div className="p-2 flex gap-1">
+                                  <input
+                                    autoFocus
+                                    value={newSpeakerName}
+                                    onChange={e => setNewSpeakerName(e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') {
+                                        const name = newSpeakerName.trim();
+                                        if (!name) return;
+                                        const count = (transcript.speakers || []).length;
+                                        const newSp = { id: `spk-${Date.now()}`, label: name, customName: name, color: SPEAKER_COLORS[count % SPEAKER_COLORS.length], firstAppearance: 0, totalDuration: 0, segmentCount: 1 };
+                                        updateTranscript({ ...transcript, speakers: [...(transcript.speakers || []), newSp], segments: transcript.segments.map(s => group.segments.some(gs => gs.id === s.id) ? { ...s, speakerId: newSp.id, speakerName: name } : s) });
+                                        setSpeakerPopoverSegId(null); setIsAddingNewSpeaker(false); setNewSpeakerName('');
+                                      }
+                                      if (e.key === 'Escape') { setIsAddingNewSpeaker(false); setNewSpeakerName(''); }
+                                    }}
+                                    placeholder="Speaker name..."
+                                    className="flex-1 bg-gray-50 border border-gray-300 rounded px-2 py-1 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:border-[#7c3aed]/50"
+                                  />
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setIsAddingNewSpeaker(true)}
+                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 transition text-left"
+                                >
+                                  <Plus className="w-3 h-3 text-gray-400" />
+                                  <span className="text-xs text-gray-500">Add new speaker</span>
+                                </button>
+                              )}
+                              {firstSeg.speakerId && (
+                                <button
+                                  onClick={() => { updateTranscript({ ...transcript, segments: transcript.segments.map(s => group.segments.some(gs => gs.id === s.id) ? { ...s, speakerId: undefined, speakerName: undefined } : s) }); setSpeakerPopoverSegId(null); }}
+                                  className="w-full px-3 py-2 hover:bg-gray-50 transition text-left border-t border-gray-100"
+                                >
+                                  <span className="text-xs text-red-400">Remove speaker</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ── Transcript text (single thumbnail per group) ── */}
+                        <div className="flex gap-3 items-start">
+                          {videoUrl && (
+                            <div className="w-12 h-12 rounded-md overflow-hidden flex-shrink-0 mt-0.5 border border-gray-100 bg-gray-100">
+                              <video src={`${videoUrl}#t=${firstSeg.startTime}`} muted preload="metadata" className="w-full h-full object-cover" />
+                            </div>
+                          )}
+                          <p className="flex-1 text-[17px] leading-[1.9] text-gray-800 select-none font-normal">
+                            {group.segments.flatMap((seg, segIdx) => {
+                              const globalSegIdx = group.globalStartIdx + segIdx;
+                              const words = seg.words ?? [];
+                              return words.map((word, wordIndex) => {
+                                const isCurrentWord =
+                                  currentWordPosition &&
+                                  currentWordPosition.segmentIndex === globalSegIdx &&
+                                  currentWordPosition.wordIndex === wordIndex;
+                                const nextWordText = wordIndex < words.length - 1
+                                  ? words[wordIndex + 1].text
+                                  : (group.segments[segIdx + 1]?.words?.[0]?.text ?? '');
+                                const cjkRe = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/;
+                                const noSpace = cjkRe.test(word.text) || cjkRe.test(nextWordText);
+                                return (
+                                  <span
+                                    key={`${segIdx}-${wordIndex}`}
+                                    onClick={() => seekTo(word.startTime)}
+                                    className={`cursor-pointer rounded-sm transition-all duration-75 ${
+                                      isCurrentWord
+                                        ? 'bg-blue-100 text-blue-800 underline decoration-blue-400 decoration-2 underline-offset-2'
+                                        : 'hover:bg-gray-100 text-gray-800'
+                                    }`}
+                                  >
+                                    {word.text}{noSpace ? '' : ' '}
+                                  </span>
+                                );
+                              });
+                            })}
+                            {group.segments.every(s => !s.words?.length) && (
+                              <span className="text-gray-800">{group.segments.map(s => s.text).join(' ')}</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {!transcript && !transcriptionStatus?.status && !showProcessingPanel && (
-              <div className="text-center text-gray-500 mt-8">
-                <FileText className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                <p className="text-sm">Your transcript will appear here</p>
+              <div className="text-center text-gray-400 mt-8">
+                <FileText className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                <p className="text-sm text-gray-400">Your transcript will appear here</p>
               </div>
             )}
           </div>
         </aside>
 
         {/* Center - Video Canvas */}
-        <main className="flex-1 flex flex-col bg-[#121212] overflow-hidden">
+        <main className="flex-1 flex flex-col bg-[#2a2a2a] overflow-hidden">
           {/* Canvas Area */}
           <div className="flex-1 flex items-center justify-center p-6">
             {videoUrl ? (
-              <div className="relative bg-black rounded-lg overflow-hidden shadow-2xl" style={{ maxHeight: '60vh', aspectRatio: '16/9' }}>
+              <div
+                className="relative bg-black rounded-xl overflow-hidden shadow-2xl"
+                style={
+                  videoAspect === 'portrait'
+                    ? { height: '72vh', aspectRatio: '9/16', maxWidth: '100%' }
+                    : videoAspect === 'square'
+                    ? { height: '60vh', aspectRatio: '1/1', maxWidth: '100%' }
+                    : { width: '100%', maxHeight: '65vh', aspectRatio: '16/9' }
+                }
+              >
                 <video
                   ref={videoRef}
-                  src={videoUrl}
+                  src={videoUrl || undefined}
                   className="w-full h-full object-contain"
+                  preload="auto"
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onEnded={() => setIsPlaying(false)}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={handleLoadedMetadata}
-                  onEnded={() => setIsPlaying(false)}
+                  onError={(e) => {
+                    const target = e.target as HTMLVideoElement;
+                    console.error('Video error:', target.error?.message, target.error?.code);
+                    setIsPlaying(false);
+                  }}
                 />
               </div>
             ) : showProcessingPanel || pendingFile || isWaitingForFile ? (
@@ -783,41 +1123,45 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
             )}
           </div>
 
-          {/* Canvas Mode Toggle - Layout / Background */}
+          {/* Canvas Mode Toggle - Descript Style */}
           {videoUrl && (
-            <div className="flex justify-center pb-4">
-              <div className="inline-flex bg-[#2a2a2a] rounded-lg p-1">
-                <button
-                  onClick={() => setCanvasMode('layout')}
-                  className={`px-4 py-1.5 text-sm rounded-md transition ${
-                    canvasMode === 'layout' 
-                      ? 'bg-[#3a3a3a] text-white' 
-                      : 'text-gray-400 hover:text-white'
-                  }`}
-                >
-                  <Grid3X3 className="w-4 h-4 inline mr-1" />
-                  Layout
-                </button>
-                <button
-                  onClick={() => setCanvasMode('background')}
-                  className={`px-4 py-1.5 text-sm rounded-md transition ${
-                    canvasMode === 'background' 
-                      ? 'bg-[#3a3a3a] text-white' 
-                      : 'text-gray-400 hover:text-white'
-                  }`}
-                >
-                  <Palette className="w-4 h-4 inline mr-1" />
-                  Background
-                </button>
-              </div>
+            <div className="flex items-center justify-center gap-2 pb-3">
+              <button
+                onClick={() => setCanvasMode('layout')}
+                className={`px-3 py-1 text-xs rounded-md transition flex items-center gap-1 ${
+                  canvasMode === 'layout'
+                    ? 'bg-[#3a3a3a] text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-[#3a3a3a]'
+                }`}
+              >
+                <Grid3X3 className="w-3 h-3" />
+                Layout
+              </button>
+              <button
+                onClick={() => setCanvasMode('background')}
+                className={`px-3 py-1 text-xs rounded-md transition flex items-center gap-1 ${
+                  canvasMode === 'background'
+                    ? 'bg-[#3a3a3a] text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-[#3a3a3a]'
+                }`}
+              >
+                <Palette className="w-3 h-3" />
+                Background
+              </button>
+              {/* Color circle */}
+              <div className="w-5 h-5 rounded-full bg-black border-2 border-white/30 cursor-pointer hover:border-white/60 transition" title="Background color" />
+              {/* Layers icon */}
+              <button className="p-1 text-gray-400 hover:text-white hover:bg-[#3a3a3a] rounded transition">
+                <Layers className="w-3.5 h-3.5" />
+              </button>
             </div>
           )}
         </main>
 
         {/* Right Panel - Underlord */}
-        <aside className="w-80 bg-[#1e1e1e] border-l border-[#2a2a2a] flex flex-col flex-shrink-0">
-          {/* Tab Navigation */}
-          <div className="flex border-b border-[#2a2a2a] overflow-x-auto">
+        <aside className="flex bg-[#1e1e1e] border-l border-[#2a2a2a] flex-shrink-0">
+          {/* Narrow Icon Sidebar */}
+          <div className="w-12 flex flex-col items-center py-2 gap-1 border-r border-[#2a2a2a]">
             {[
               { id: 'project', icon: Home, label: 'Project' },
               { id: 'ai-tools', icon: Wand2, label: 'AI Tools' },
@@ -829,30 +1173,46 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
               <button
                 key={tab.id}
                 onClick={() => setRightPanel(tab.id as any)}
-                className={`p-3 transition flex-shrink-0 ${
-                  rightPanel === tab.id 
-                    ? 'text-[#7c3aed] border-b-2 border-[#7c3aed]' 
-                    : 'text-gray-500 hover:text-gray-300'
+                className={`w-9 h-9 flex items-center justify-center rounded-lg transition ${
+                  rightPanel === tab.id
+                    ? 'bg-[#7c3aed]/20 text-[#7c3aed]'
+                    : 'text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]'
                 }`}
                 title={tab.label}
               >
                 <tab.icon className="w-4 h-4" />
               </button>
             ))}
+            {/* Spacer */}
+            <div className="flex-1" />
+            {/* Underlord icon at bottom */}
+            <button
+              onClick={() => setRightPanel('underlord')}
+              className={`w-9 h-9 flex items-center justify-center rounded-lg transition ${
+                rightPanel === 'underlord'
+                  ? 'bg-[#7c3aed]/20 text-[#7c3aed]'
+                  : 'text-gray-500 hover:text-gray-300 hover:bg-[#2a2a2a]'
+              }`}
+              title="Underlord AI"
+            >
+              <Sparkles className="w-4 h-4" />
+            </button>
           </div>
 
-          {/* Underlord Panel Content */}
-          <div className="flex-1 overflow-y-auto p-4">
-            {rightPanel === 'underlord' || rightPanel === 'ai-tools' ? (
-              <UnderlordPanel />
+          {/* Panel Content */}
+          <div className="w-72 flex flex-col overflow-hidden">
+            {rightPanel === 'underlord' ? (
+              <InteractiveWorkflowSidebar />
+            ) : rightPanel === 'ai-tools' ? (
+              <AIToolsPanel />
             ) : rightPanel === 'properties' ? (
-              <PropertiesPanel />
+              <div className="flex-1 overflow-y-auto p-4"><PropertiesPanel /></div>
             ) : rightPanel === 'elements' ? (
-              <ElementsPanel />
+              <div className="flex-1 overflow-y-auto p-4"><ElementsPanel /></div>
             ) : rightPanel === 'media' ? (
-              <MediaPanel />
+              <div className="flex-1 overflow-y-auto p-4"><MediaPanel /></div>
             ) : (
-              <div className="text-center text-gray-500 mt-8">
+              <div className="flex-1 overflow-y-auto p-4 text-center text-gray-500 mt-8">
                 <p className="text-sm">Panel content</p>
               </div>
             )}
@@ -861,18 +1221,18 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       </div>
 
       {/* Bottom Timeline - Descript Style */}
-      <div 
-        className="bg-gradient-to-b from-[#2d1f3d] to-[#1e1e2e] border-t border-[#3d2d4d] flex flex-col flex-shrink-0"
-        style={{ 
-          height: `${Math.min(Math.max(200, 160 + customTracks.length * 48), 400)}px` 
+      <div
+        className="bg-[#181818] border-t border-[#2a2a2a] flex flex-col flex-shrink-0"
+        style={{
+          height: `${Math.min(Math.max(200, 160 + customTracks.length * 48), 400)}px`
         }}
       >
         {/* Transport Controls - Descript Style */}
-        <div className="h-11 border-b border-[#3d2d4d]/50 flex items-center px-3 gap-2">
+        <div className="h-11 border-b border-[#252525] flex items-center px-3 gap-2">
           {/* Add Track Button */}
           <div className="relative">
-            <button 
-              className="p-1.5 hover:bg-white/10 rounded transition" 
+            <button
+              className="p-1.5 hover:bg-[#252525] rounded transition"
               title="Add Track"
               onClick={() => setShowAddTrackMenu(!showAddTrackMenu)}
             >
@@ -881,7 +1241,7 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
             
             {/* Add Track Menu */}
             {showAddTrackMenu && (
-              <div className="absolute top-full left-0 mt-1 w-48 bg-[#2a2a3a] border border-[#4d3d5d] rounded-lg shadow-xl z-50 py-1">
+              <div className="absolute top-full left-0 mt-1 w-48 bg-[#252525] border border-[#333] rounded-lg shadow-xl z-50 py-1">
                 <button
                   className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-white/10 flex items-center gap-2"
                   onClick={() => {
@@ -946,72 +1306,101 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
             )}
           </div>
 
-          <div className="h-5 w-px bg-[#4d3d5d]" />
+          <div className="h-5 w-px bg-[#2a2a2a]" />
 
           {/* Navigation */}
           <div className="flex items-center gap-0.5">
-            <button 
+            <button
               onClick={skipBackward}
-              className="p-1.5 hover:bg-white/10 rounded transition text-gray-300"
-              title="Previous"
+              className="p-1.5 hover:bg-white/10 rounded transition text-gray-400 hover:text-gray-200"
+              title="Back 5s"
             >
-              <ChevronLeft className="w-4 h-4" /><ChevronLeft className="w-4 h-4 -ml-3" />
+              <SkipBack className="w-4 h-4" />
             </button>
-            <button 
+            <button
               onClick={skipForward}
-              className="p-1.5 hover:bg-white/10 rounded transition text-gray-300"
-              title="Next"
+              className="p-1.5 hover:bg-white/10 rounded transition text-gray-400 hover:text-gray-200"
+              title="Forward 5s"
             >
-              <ChevronRight className="w-4 h-4" /><ChevronRight className="w-4 h-4 -ml-3" />
+              <SkipForward className="w-4 h-4" />
             </button>
           </div>
 
           {/* Time Display - Descript Style */}
-          <div className="text-sm font-mono bg-[#1a1a2a] px-2 py-0.5 rounded">
-            <span className="text-white">{formatTimeCode(currentTime)}</span>
+          <div className="text-sm font-mono bg-[#252525] border border-[#333] px-2 py-0.5 rounded text-gray-200">
+            <span>{formatTimeCode(currentTime)}</span>
           </div>
 
-          <div className="h-5 w-px bg-[#4d3d5d]" />
+          <div className="h-5 w-px bg-[#2a2a2a]" />
 
           {/* Record Button */}
-          <button className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded-full transition text-white text-sm font-medium">
+          <button className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded-full transition text-white text-xs font-medium">
             <div className="w-2 h-2 rounded-full bg-white" />
             Record
           </button>
 
-          <div className="h-5 w-px bg-[#4d3d5d]" />
+          <div className="h-5 w-px bg-[#2a2a2a]" />
 
           {/* Play Button */}
-          <button 
+          <button
             onClick={togglePlay}
-            className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition"
+            className="w-8 h-8 flex items-center justify-center bg-white hover:bg-gray-100 rounded-full transition flex-shrink-0"
           >
-            {isPlaying ? <Pause className="w-4 h-4 text-white" /> : <Play className="w-4 h-4 text-white" fill="white" />}
+            {isPlaying
+              ? <Pause className="w-4 h-4 text-black" fill="black" />
+              : <Play className="w-4 h-4 text-black ml-0.5" fill="black" />}
           </button>
 
           {/* Speed Control */}
-          <button 
-            className="px-2 py-1 text-sm text-gray-300 hover:bg-white/10 rounded transition font-medium"
-            onClick={() => {
-              const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
-              const currentIndex = speeds.indexOf(playbackSpeed);
-              const nextIndex = (currentIndex + 1) % speeds.length;
-              setPlaybackSpeed(speeds[nextIndex]);
-            }}
-          >
-            {playbackSpeed}x
-          </button>
+          <div className="relative">
+            <button
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-[#252525] rounded transition font-medium"
+              onClick={() => setShowSpeedMenu(v => !v)}
+            >
+              {playbackSpeed}x
+            </button>
+            {showSpeedMenu && (
+              <>
+                {/* Backdrop */}
+                <div className="fixed inset-0 z-40" onClick={() => setShowSpeedMenu(false)} />
+                {/* Dropdown */}
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 bg-white rounded-xl shadow-2xl overflow-hidden min-w-[200px] py-1.5">
+                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3].map(speed => (
+                    <button
+                      key={speed}
+                      className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-900 hover:bg-gray-100 transition-colors"
+                      onClick={() => { setPlaybackSpeed(speed); setShowSpeedMenu(false); }}
+                    >
+                      <span className="w-4 text-center text-gray-700">{speed === playbackSpeed ? '✓' : ''}</span>
+                      <span>{speed}x</span>
+                    </button>
+                  ))}
+                  <div className="my-1 border-t border-gray-200" />
+                  {[
+                    { label: 'Decrease speed', shortcut: 'Shift+J' },
+                    { label: 'Reset speed',    shortcut: 'Shift+K' },
+                    { label: 'Increase speed', shortcut: 'Shift+L' },
+                  ].map(({ label, shortcut }) => (
+                    <div key={label} className="flex items-center justify-between px-4 py-2 text-sm text-gray-500 select-none">
+                      <span>{label}</span>
+                      <span className="text-gray-400">{shortcut}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
 
-          <div className="h-5 w-px bg-[#4d3d5d]" />
+          <div className="h-5 w-px bg-[#2a2a2a]" />
 
           {/* Split Button */}
           <div className="relative group">
-            <button 
-              className="flex items-center gap-1.5 px-2 py-1 text-sm text-gray-300 hover:bg-white/10 rounded transition"
+            <button
+              className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-[#252525] rounded transition"
               onClick={handleSplit}
               title="Split scene (S)"
             >
-              <Scissors className="w-4 h-4" />
+              <Scissors className="w-3.5 h-3.5" />
               Split
             </button>
             {/* Tooltip */}
@@ -1025,20 +1414,20 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
           <div className="flex-1" />
 
           {/* Duration Display */}
-          <span className="text-xs text-gray-400">{formatTimeCode(duration)}</span>
+          <span className="text-xs text-gray-500 font-mono">{formatTimeCode(duration)}</span>
 
-          <div className="h-5 w-px bg-[#4d3d5d]" />
+          <div className="h-5 w-px bg-[#2a2a2a]" />
 
           {/* Zoom Controls */}
           <div className="flex items-center gap-1">
             <button className="p-1 hover:bg-white/10 rounded transition">
-              <ZoomOut className="w-4 h-4 text-gray-400" />
+              <ZoomOut className="w-3.5 h-3.5 text-gray-400" />
             </button>
-            <div className="w-16 h-1 bg-[#4d3d5d] rounded-full overflow-hidden">
-              <div className="w-1/2 h-full bg-purple-400 rounded-full" />
+            <div className="w-16 h-1 bg-[#333] rounded-full overflow-hidden">
+              <div className="w-1/2 h-full bg-[#7c3aed] rounded-full" />
             </div>
             <button className="p-1 hover:bg-white/10 rounded transition">
-              <ZoomIn className="w-4 h-4 text-gray-400" />
+              <ZoomIn className="w-3.5 h-3.5 text-gray-400" />
             </button>
           </div>
         </div>
@@ -1065,6 +1454,59 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
           />
         </div>
       </div>
+
+      {/* Activity floating panel */}
+      {showProcessingPanel && (
+        <div className="fixed bottom-24 right-80 z-50 w-72 bg-white rounded-xl shadow-2xl border border-gray-100 overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <span className="text-sm font-medium text-gray-800">Activity</span>
+            <button onClick={() => setActivityCollapsed(c => !c)} className="text-gray-400 hover:text-gray-600 transition">
+              <ChevronDown className={`w-4 h-4 transition-transform duration-200 ${activityCollapsed ? '-rotate-90' : ''}`} />
+            </button>
+          </div>
+
+          {/* Task list */}
+          {!activityCollapsed && (
+            <div className="py-1">
+              {/* Upload task */}
+              {processingStatus.upload !== 'idle' && (
+                <div className="flex items-center gap-3 px-4 py-2.5">
+                  <ActivityStatusIcon status={processingStatus.upload} progress={processingStatus.uploadProgress} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-gray-700 truncate">
+                      {processingStatus.upload === 'completed' ? 'Upload completed' : `Uploading ${pendingFile?.name || projectTitle}`}
+                    </p>
+                    {processingStatus.upload === 'processing' && pendingFile && (
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {formatBytes(Math.round(pendingFile.size * processingStatus.uploadProgress / 100))} / {formatBytes(pendingFile.size)}
+                      </p>
+                    )}
+                  </div>
+                  {processingStatus.upload === 'processing' && (
+                    <span className="text-xs text-gray-400 flex-shrink-0">{processingStatus.uploadProgress}%</span>
+                  )}
+                </div>
+              )}
+
+              {/* Transcription task */}
+              {processingStatus.transcription !== 'idle' && (
+                <div className="flex items-center gap-3 px-4 py-2.5">
+                  <ActivityStatusIcon status={processingStatus.transcription} progress={processingStatus.transcriptionProgress} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-gray-700 truncate">
+                      {processingStatus.transcription === 'completed' ? 'Transcription completed' : `Transcribing ${pendingFile?.name || projectTitle}`}
+                    </p>
+                  </div>
+                  {processingStatus.transcription === 'processing' && (
+                    <span className="text-xs text-gray-400 flex-shrink-0">{processingStatus.transcriptionProgress}%</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Export Modal */}
       {showExportModal && <ExportModal onClose={() => setShowExportModal(false)} />}
@@ -1115,66 +1557,233 @@ function ProcessingStep({
   );
 }
 
-// Underlord Panel Component
-function UnderlordPanel() {
-  const [prompt, setPrompt] = useState('');
+// ── Activity Panel helpers ─────────────────────────────────────────────────
 
-  const suggestions = [
-    { icon: Sparkles, label: 'Remove filler words', desc: 'um, uh, like...' },
-    { icon: Wand2, label: 'Studio Sound', desc: 'Enhance audio' },
-    { icon: MessageSquare, label: 'Add captions', desc: 'Auto-generate' },
-    { icon: Scissors, label: 'Remove silences', desc: 'Clean up gaps' },
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+}
+
+function ActivityStatusIcon({ status, progress }: { status: string; progress?: number }) {
+  if (status === 'completed') {
+    return (
+      <div className="w-5 h-5 flex items-center justify-center flex-shrink-0">
+        <CheckCircle className="w-5 h-5 text-green-500" />
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <div className="w-5 h-5 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+        <X className="w-3 h-3 text-red-500" />
+      </div>
+    );
+  }
+  // processing — circular progress ring
+  const r = 7.5;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - (progress ?? 0) / 100);
+  return (
+    <svg className="w-5 h-5 flex-shrink-0 -rotate-90" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r={r} fill="none" stroke="#e5e7eb" strokeWidth="2" />
+      <circle
+        cx="10" cy="10" r={r}
+        fill="none" stroke="#6b7280" strokeWidth="2"
+        strokeDasharray={circ} strokeDashoffset={offset}
+        strokeLinecap="round"
+        className="transition-all duration-500"
+      />
+    </svg>
+  );
+}
+
+// Message type for Underlord chat
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  isError?: boolean;
+}
+
+// Underlord Panel - Descript-style AI chat interface
+function UnderlordPanel() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [prompt, setPrompt] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const quickActions = [
+    'Remove filler words',
+    'Enhance audio with Studio Sound',
+    'Add captions automatically',
+    'Remove silences and gaps',
+    'Generate a summary',
+  ];
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => { scrollToBottom(); }, [messages]);
+
+  const sendMessage = async (text?: string) => {
+    const content = text || prompt.trim();
+    if (!content) return;
+
+    setMessages(prev => [...prev, { role: 'user', content }]);
+    setPrompt('');
+    setIsLoading(true);
+
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4001'}/api/ai/orchestrate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: content }),
+      });
+
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
+      const data = await response.json();
+      const reply = data?.data?.result || data?.data?.message || 'Task completed successfully.';
+      setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+    } catch (err: any) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "I wasn't able to complete that task right now. Please try again.",
+        isError: true,
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-[#2a2a2a] flex-shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
+          <Sparkles className="w-3.5 h-3.5 text-white" />
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-white leading-none">Underlord</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">AI Assistant</p>
+        </div>
+      </div>
+
+      {/* Messages Area */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {messages.length === 0 && (
+          <div className="pt-2 space-y-2">
+            <p className="text-xs text-gray-500 px-1">Quick actions</p>
+            {quickActions.map((action, i) => (
+              <button
+                key={i}
+                onClick={() => sendMessage(action)}
+                className="w-full text-left px-3 py-2 bg-[#252525] hover:bg-[#2a2a2a] border border-[#333] hover:border-[#7c3aed]/40 rounded-lg text-xs text-gray-300 transition"
+              >
+                {action}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {messages.map((msg, i) => (
+          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            {msg.role === 'assistant' && (
+              <div className="w-6 h-6 rounded-md bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0 mr-2 mt-0.5">
+                <Sparkles className="w-3 h-3 text-white" />
+              </div>
+            )}
+            <div
+              className={`max-w-[85%] px-3 py-2 rounded-xl text-xs leading-relaxed ${
+                msg.role === 'user'
+                  ? 'bg-[#7c3aed] text-white rounded-br-sm'
+                  : msg.isError
+                  ? 'bg-red-900/30 text-red-300 border border-red-800/50 rounded-bl-sm'
+                  : 'bg-[#252525] text-gray-200 border border-[#333] rounded-bl-sm'
+              }`}
+            >
+              {msg.content}
+            </div>
+          </div>
+        ))}
+
+        {isLoading && (
+          <div className="flex justify-start">
+            <div className="w-6 h-6 rounded-md bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0 mr-2 mt-0.5">
+              <Sparkles className="w-3 h-3 text-white" />
+            </div>
+            <div className="bg-[#252525] border border-[#333] rounded-xl rounded-bl-sm px-3 py-2">
+              <div className="flex gap-1 items-center h-4">
+                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input Area */}
+      <div className="p-3 border-t border-[#2a2a2a] flex-shrink-0">
+        <div className="flex gap-2 items-end">
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+            placeholder="Tell Underlord what you want to make..."
+            rows={2}
+            className="flex-1 bg-[#252525] border border-[#3a3a3a] rounded-lg px-3 py-2 text-xs text-gray-200 outline-none focus:border-[#7c3aed] transition resize-none placeholder-gray-600"
+          />
+          <button
+            onClick={() => sendMessage()}
+            disabled={!prompt.trim() || isLoading}
+            className="w-8 h-8 flex items-center justify-center bg-[#7c3aed] hover:bg-[#6d28d9] disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition flex-shrink-0"
+          >
+            <ChevronRight className="w-4 h-4 text-white" />
+          </button>
+        </div>
+        <p className="text-[10px] text-gray-600 mt-1.5 text-center">Press Enter to send · Shift+Enter for new line</p>
+      </div>
+    </div>
+  );
+}
+
+// AI Tools Panel - separated from Underlord
+function AIToolsPanel() {
+  const tools = [
+    { icon: Sparkles, label: 'Remove filler words', desc: 'Cuts um, uh, like, and other filler', color: 'text-purple-400' },
+    { icon: Wand2, label: 'Studio Sound', desc: 'Professional audio enhancement', color: 'text-blue-400' },
+    { icon: MessageSquare, label: 'Add captions', desc: 'Auto-generate captions', color: 'text-green-400' },
+    { icon: Scissors, label: 'Remove silences', desc: 'Clean up gaps and pauses', color: 'text-yellow-400' },
+    { icon: Layers, label: 'Eye contact correction', desc: 'Fix camera eye contact with AI', color: 'text-pink-400' },
+    { icon: FileText, label: 'Generate chapters', desc: 'Auto-create chapter markers', color: 'text-orange-400' },
   ];
 
   return (
-    <div className="space-y-4">
-      {/* Header with Icon */}
-      <div className="flex items-center gap-2">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-          <Sparkles className="w-4 h-4 text-white" />
-        </div>
-        <div>
-          <h3 className="text-sm font-semibold text-white">Underlord</h3>
-          <p className="text-xs text-gray-500">AI Assistant</p>
-        </div>
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3 border-b border-[#2a2a2a] flex-shrink-0">
+        <h3 className="text-sm font-semibold text-white">AI Tools</h3>
+        <p className="text-xs text-gray-500 mt-0.5">One-click AI enhancements</p>
       </div>
-
-      {/* Input */}
-      <div className="relative">
-        <input
-          type="text"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Tell Underlord what you want to make"
-          className="w-full bg-[#2a2a2a] border border-[#3a3a3a] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#7c3aed] transition"
-        />
-      </div>
-
-      {/* Browse Templates */}
-      <button className="w-full py-2 text-sm text-[#7c3aed] hover:bg-[#7c3aed]/10 rounded-lg transition flex items-center justify-center gap-1">
-        <Layers className="w-4 h-4" />
-        Browse templates
-      </button>
-
-      {/* Divider */}
-      <div className="h-px bg-[#2a2a2a]" />
-
-      {/* Suggestions */}
-      <div className="space-y-2">
-        <p className="text-xs text-gray-500 uppercase tracking-wide">Suggestions</p>
-        {suggestions.map((suggestion, i) => (
+      <div className="flex-1 overflow-y-auto p-3 space-y-1">
+        {tools.map((tool, i) => (
           <button
             key={i}
-            className="w-full flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition text-left"
+            className="w-full flex items-center gap-3 p-3 hover:bg-[#252525] rounded-lg transition text-left group"
           >
-            <div className="w-8 h-8 rounded-lg bg-[#2a2a2a] flex items-center justify-center flex-shrink-0">
-              <suggestion.icon className="w-4 h-4 text-[#7c3aed]" />
+            <div className="w-8 h-8 rounded-lg bg-[#252525] group-hover:bg-[#2f2f2f] flex items-center justify-center flex-shrink-0 border border-[#333]">
+              <tool.icon className={`w-4 h-4 ${tool.color}`} />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm text-white truncate">{suggestion.label}</p>
-              <p className="text-xs text-gray-500 truncate">{suggestion.desc}</p>
+              <p className="text-sm text-gray-200 font-medium">{tool.label}</p>
+              <p className="text-xs text-gray-500 mt-0.5">{tool.desc}</p>
             </div>
-            <ChevronRight className="w-4 h-4 text-gray-500" />
+            <ChevronRight className="w-4 h-4 text-gray-600 opacity-0 group-hover:opacity-100 transition" />
           </button>
         ))}
       </div>
@@ -1281,6 +1890,8 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
   const timelineRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoom, setZoom] = useState(1);
+  const isDraggingPlayhead = useRef(false);
+  const playheadDragged = useRef(false); // suppress click after drag-release
 
   // Descript-style time code format
   const formatTimeCode = (time: number) => {
@@ -1379,6 +1990,8 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
   }, [videoUrl]);
 
   const handleClick = (e: React.MouseEvent) => {
+    // Suppress click that fires after a playhead drag-release
+    if (playheadDragged.current) { playheadDragged.current = false; return; }
     if (!timelineRef.current) return;
     const rect = timelineRef.current.getBoundingClientRect();
     const scrollLeft = timelineRef.current.scrollLeft;
@@ -1387,43 +2000,70 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
     onSeek(time);
   };
 
+  const handlePlayheadMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation(); // don't trigger timeline click
+    isDraggingPlayhead.current = true;
+    playheadDragged.current = false;
+  };
+
+  const handleTimelineMouseMove = (e: React.MouseEvent) => {
+    if (!isDraggingPlayhead.current || !timelineRef.current) return;
+    playheadDragged.current = true;
+    const rect = timelineRef.current.getBoundingClientRect();
+    const scrollLeft = timelineRef.current.scrollLeft;
+    const x = e.clientX - rect.left + scrollLeft;
+    const time = Math.max(0, Math.min(x / pixelsPerSecond, duration));
+    onSeek(time);
+  };
+
+  const handleTimelineMouseUp = () => {
+    isDraggingPlayhead.current = false;
+  };
+
+  // Stop drag even if mouse is released outside the timeline
+  useEffect(() => {
+    const onDocMouseUp = () => { isDraggingPlayhead.current = false; };
+    document.addEventListener('mouseup', onDocMouseUp);
+    return () => document.removeEventListener('mouseup', onDocMouseUp);
+  }, []);
+
   return (
     <div className="flex flex-col min-h-full">
       {/* Track Labels - Descript Style */}
       <div className="flex">
-        <div className="w-28 flex-shrink-0 bg-[#1a1525] border-r border-[#3d2d4d]/50">
-          <div className="h-6 border-b border-[#3d2d4d]/50" />
-          <div className="h-16 px-3 flex items-center justify-between border-b border-[#3d2d4d]/30 group">
+        <div className="w-28 flex-shrink-0 bg-[#161616] border-r border-[#262626]">
+          <div className="h-6 border-b border-[#262626]" />
+          <div className="h-16 px-3 flex items-center justify-between border-b border-[#262626] group">
             <div className="flex items-center gap-2">
-              <div className="w-5 h-5 rounded bg-purple-500/30 flex items-center justify-center">
-                <Video className="w-3 h-3 text-purple-300" />
+              <div className="w-5 h-5 rounded bg-purple-500/20 flex items-center justify-center">
+                <Video className="w-3 h-3 text-purple-400" />
               </div>
-              <span className="text-xs text-gray-300 font-medium">Scene</span>
+              <span className="text-xs text-gray-400 font-medium">Scene</span>
             </div>
-            <MoreHorizontal className="w-4 h-4 text-gray-500 opacity-0 group-hover:opacity-100 transition" />
+            <MoreHorizontal className="w-4 h-4 text-gray-600 opacity-0 group-hover:opacity-100 transition" />
           </div>
-          <div className="h-10 px-3 flex items-center justify-between border-b border-[#3d2d4d]/30 group">
+          <div className="h-10 px-3 flex items-center justify-between border-b border-[#262626] group">
             <div className="flex items-center gap-2">
-              <div className="w-5 h-5 rounded bg-blue-500/30 flex items-center justify-center">
-                <Type className="w-3 h-3 text-blue-300" />
+              <div className="w-5 h-5 rounded bg-blue-500/20 flex items-center justify-center">
+                <Type className="w-3 h-3 text-blue-400" />
               </div>
-              <span className="text-xs text-gray-300 font-medium">Text</span>
+              <span className="text-xs text-gray-400 font-medium">Text</span>
             </div>
-            <MoreHorizontal className="w-4 h-4 text-gray-500 opacity-0 group-hover:opacity-100 transition" />
+            <MoreHorizontal className="w-4 h-4 text-gray-600 opacity-0 group-hover:opacity-100 transition" />
           </div>
-          <div className="h-14 px-3 flex items-center justify-between group border-b border-[#3d2d4d]/30">
+          <div className="h-14 px-3 flex items-center justify-between group border-b border-[#262626]">
             <div className="flex items-center gap-2">
-              <div className="w-5 h-5 rounded bg-cyan-500/30 flex items-center justify-center">
-                <Music className="w-3 h-3 text-cyan-300" />
+              <div className="w-5 h-5 rounded bg-cyan-500/20 flex items-center justify-center">
+                <Music className="w-3 h-3 text-cyan-400" />
               </div>
-              <span className="text-xs text-gray-300 font-medium">Audio</span>
+              <span className="text-xs text-gray-400 font-medium">Audio</span>
             </div>
-            <MoreHorizontal className="w-4 h-4 text-gray-500 opacity-0 group-hover:opacity-100 transition" />
+            <MoreHorizontal className="w-4 h-4 text-gray-600 opacity-0 group-hover:opacity-100 transition" />
           </div>
-          
+
           {/* Custom Tracks Labels */}
           {customTracks.map((track) => (
-            <div key={track.id} className="h-12 px-3 flex items-center justify-between group border-b border-[#3d2d4d]/30">
+            <div key={track.id} className="h-12 px-3 flex items-center justify-between group border-b border-[#262626]">
               <div className="flex items-center gap-2">
                 <div className={`w-5 h-5 rounded flex items-center justify-center ${
                   track.type === 'video' ? 'bg-purple-500/30' :
@@ -1450,22 +2090,24 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
         </div>
 
         {/* Timeline Content - Descript Style */}
-        <div 
+        <div
           ref={timelineRef}
-          className="flex-1 overflow-x-auto overflow-y-hidden cursor-pointer bg-[#1e1830]"
+          className="flex-1 overflow-x-auto overflow-y-hidden cursor-pointer bg-[#161616]"
           onClick={handleClick}
+          onMouseMove={handleTimelineMouseMove}
+          onMouseUp={handleTimelineMouseUp}
         >
           <div style={{ width: totalWidth }} className="relative h-full">
             {/* Time Ruler - Descript Style */}
-            <div className="h-6 border-b border-[#3d2d4d]/30 bg-[#1a1525] relative">
+            <div className="h-6 border-b border-[#262626] bg-[#111111] relative">
               {Array.from({ length: Math.ceil(duration) + 1 }).map((_, i) => (
                 <div
                   key={i}
                   className="absolute top-0 h-full flex items-center"
                   style={{ left: i * pixelsPerSecond }}
                 >
-                  <div className="h-2 w-px bg-[#4d3d5d]" />
-                  <span className="text-[10px] text-gray-500 ml-1 font-mono">
+                  <div className="h-2 w-px bg-[#3a3a3a]" />
+                  <span className="text-[10px] text-gray-600 ml-1 font-mono">
                     {formatTimeCode(i)}
                   </span>
                 </div>
@@ -1473,7 +2115,7 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
             </div>
 
             {/* Video Track with Split Clips */}
-            <div className="h-16 border-b border-[#3d2d4d]/30 relative bg-[#1e1830]">
+            <div className="h-16 border-b border-[#262626] relative bg-[#161616]">
               {/* Render each video clip separately */}
               {videoClips.filter(clip => !clip.isDeleted).map((clip, clipIndex) => {
                 const clipWidth = (clip.endTime - clip.startTime) * pixelsPerSecond;
@@ -1498,10 +2140,12 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onSelectClip(isSelected ? null : clip.id);
+                      const selecting = !isSelected;
+                      onSelectClip(selecting ? clip.id : null);
+                      if (selecting) onSeek(clip.startTime);
                     }}
                   >
-                    <div className={`h-full flex border-l-2 ${isSelected ? 'border-white bg-purple-700/50' : 'border-purple-400 bg-gradient-to-b from-purple-800/40 to-purple-900/40'}`}>
+                    <div className={`h-full flex border-l-2 ${isSelected ? 'border-white bg-[#4a3080]/60' : 'border-purple-500 bg-gradient-to-b from-[#3a2060]/50 to-[#2a1850]/50'}`}>
                       {clipThumbnails.length > 0 ? (
                         clipThumbnails.map((thumb, i) => (
                           <div 
@@ -1557,7 +2201,7 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
             </div>
 
             {/* Text Track with Words - Descript Style */}
-            <div className="h-10 border-b border-[#3d2d4d]/30 relative bg-[#1e1830]">
+            <div className="h-10 border-b border-[#262626] relative bg-[#161616]">
               {transcript?.segments?.map((segment: any, segIdx: number) => (
                 segment.words?.map((word: any, wordIdx: number) => (
                   <div
@@ -1575,7 +2219,7 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
             </div>
 
             {/* Audio Waveform Track - Descript Style */}
-            <div className="h-14 relative bg-[#1e1830] border-b border-[#3d2d4d]/30">
+            <div className="h-14 relative bg-[#161616] border-b border-[#262626]">
               <div 
                 className="absolute top-1 bottom-1 rounded-sm overflow-hidden shadow-lg"
                 style={{ left: 0, width: duration * pixelsPerSecond || 200 }}
@@ -1603,7 +2247,7 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
 
             {/* Custom Tracks Content */}
             {customTracks.map((track) => (
-              <div key={track.id} className="h-12 relative bg-[#1e1830] border-b border-[#3d2d4d]/30">
+              <div key={track.id} className="h-12 relative bg-[#161616] border-b border-[#262626]">
                 <div 
                   className={`absolute top-1 bottom-1 rounded-sm overflow-hidden shadow-lg border-l-2 ${
                     track.type === 'video' ? 'bg-gradient-to-b from-purple-800/30 to-purple-900/30 border-purple-400' :
@@ -1623,11 +2267,14 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
             ))}
 
             {/* Playhead - Descript Style */}
-            <div 
+            <div
               className="absolute top-0 bottom-0 w-0.5 bg-white z-30 pointer-events-none shadow-lg"
               style={{ left: currentTime * pixelsPerSecond }}
             >
-              <div className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rounded-full shadow-md" />
+              <div
+                className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-4 h-4 bg-white rounded-full shadow-md pointer-events-auto cursor-ew-resize"
+                onMouseDown={handlePlayheadMouseDown}
+              />
             </div>
           </div>
         </div>
@@ -1636,18 +2283,25 @@ function EnhancedTimeline({ duration, currentTime, transcript, videoUrl, customT
   );
 }
 
-// Generate fake waveform path
+// Generate deterministic waveform path (seeded, no Math.random)
 function generateWaveformPath(width: number, height: number): string {
   const points: string[] = [];
   const centerY = height / 2;
   const step = 3;
-  
+  let seed = 0x12345678;
+
+  // Simple seeded LCG pseudo-random (same output server & client)
+  const nextRand = () => {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return (seed >>> 0) / 0xffffffff;
+  };
+
   for (let x = 0; x < width; x += step) {
-    const amplitude = Math.random() * (height / 2 - 5) + 5;
-    const y = centerY + (Math.random() > 0.5 ? amplitude : -amplitude) * 0.5;
+    const amplitude = nextRand() * (height / 2 - 5) + 5;
+    const y = centerY + (nextRand() > 0.5 ? amplitude : -amplitude) * 0.5;
     points.push(`${x === 0 ? 'M' : 'L'} ${x} ${y}`);
   }
-  
+
   return points.join(' ');
 }
 

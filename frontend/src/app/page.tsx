@@ -110,6 +110,7 @@ export default function HomePage() {
     id: string;
     originalName: string;
     filePath: string;
+    url?: string;
     thumbnailPath?: string;
     duration?: number;
     width?: number;
@@ -127,7 +128,11 @@ export default function HomePage() {
       setIsLoadingMedia(true);
       const response = await mediaApi.getAll();
       if (response.data.success && response.data.data) {
-        setMediaList(response.data.data);
+        // Sort by createdAt descending so newest uploads appear first
+        const sorted = [...response.data.data].sort(
+          (a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        setMediaList(sorted);
       }
     } catch (error) {
       console.error('Failed to fetch media:', error);
@@ -211,6 +216,13 @@ export default function HomePage() {
 
   // 点击 Get started 时跳转到编辑器（带上文件信息）
   const handleGetStarted = () => {
+    // 保存编辑需求到 sessionStorage（转录完成后自动执行）
+    if (promptText.trim()) {
+      sessionStorage.setItem('pendingAutoEdit', promptText.trim());
+    } else {
+      sessionStorage.removeItem('pendingAutoEdit');
+    }
+
     if (selectedFile) {
       // 将文件存储到 sessionStorage，然后跳转
       // 由于文件对象不能直接序列化，我们使用一个标记
@@ -944,13 +956,29 @@ export default function HomePage() {
   };
 
   const quickActions = [
-    { ...templateWorkflows['clean-up'], id: 'clean-up' },
-    { ...templateWorkflows['avatar'], id: 'avatar' },
-    { ...templateWorkflows['podcast'], id: 'podcast' },
-    { ...templateWorkflows['social-clips'], id: 'social-clips' },
-    { id: 'translate', icon: Languages, label: 'Translate & dub video', action: handleTranslateClick, special: true },
-    { ...templateWorkflows['slides'], id: 'slides' },
-    { ...templateWorkflows['animated'], id: 'animated' },
+    { ...templateWorkflows['clean-up'], id: 'clean-up', onAction: handleGetStarted, actionLabel: 'Get started' },
+    { ...templateWorkflows['avatar'], id: 'avatar', onAction: handleGetStarted, actionLabel: 'Get started' },
+    { ...templateWorkflows['podcast'], id: 'podcast', onAction: handleGetStarted, actionLabel: 'Get started' },
+    { ...templateWorkflows['social-clips'], id: 'social-clips', onAction: handleGetStarted, actionLabel: 'Get started' },
+    {
+      id: 'translate',
+      icon: Languages,
+      label: 'Translate & dub video',
+      setup: 'Upload a video file and choose the target language.\n\nI\'ll handle the full translation workflow:',
+      workflow: [
+        'Extract the original audio track from your video.',
+        'Transcribe speech to text using Whisper AI.',
+        'Translate the transcript into your target language.',
+        'Generate natural-sounding dubbed audio with matching tone and pace.',
+        'Sync the new audio track back to the original video.',
+        'Optionally add translated subtitles for accessibility.',
+      ],
+      completion: 'The dubbed video will preserve the original visuals while delivering a fully localized audio experience.',
+      onAction: handleTranslateClick,
+      actionLabel: 'Start translating',
+    },
+    { ...templateWorkflows['slides'], id: 'slides', onAction: handleGetStarted, actionLabel: 'Get started' },
+    { ...templateWorkflows['animated'], id: 'animated', onAction: handleGetStarted, actionLabel: 'Get started' },
   ];
 
   const popularFeatures = [
@@ -1761,42 +1789,23 @@ export default function HomePage() {
 
               {/* Template Workflow Cards */}
               <div className="space-y-4 mb-8 w-full">
-                {quickActions.map((action) => {
-                  // Handle special "Translate & dub" button differently
-                  if ('special' in action && action.special) {
-                    return (
-                      <button
-                        key={action.id}
-                        onClick={action.action}
-                        className="w-full max-w-4xl mx-auto flex items-center gap-3 px-6 py-4 bg-white rounded-xl text-sm text-gray-700 hover:shadow-md transition border border-gray-200 hover:border-gray-300"
-                      >
-                        <action.icon className="w-5 h-5 text-purple-600" />
-                        <span className="font-medium">{action.label}</span>
-                      </button>
-                    );
-                  }
-                  
-                  // Render template workflow cards
-                  if ('setup' in action && 'workflow' in action && 'completion' in action) {
-                    return (
-                      <TemplateWorkflowCard
-                        key={action.id}
-                        id={action.id}
-                        icon={action.icon}
-                        label={action.label}
-                        setup={action.setup}
-                        workflow={action.workflow}
-                        completion={action.completion}
-                        isExpanded={expandedTemplate === action.id}
-                        onToggle={() => {
-                          setExpandedTemplate(expandedTemplate === action.id ? null : action.id);
-                        }}
-                      />
-                    );
-                  }
-                  
-                  return null;
-                })}
+                {quickActions.map((action) => (
+                  <TemplateWorkflowCard
+                    key={action.id}
+                    id={action.id}
+                    icon={action.icon}
+                    label={action.label}
+                    setup={action.setup}
+                    workflow={action.workflow}
+                    completion={action.completion}
+                    isExpanded={expandedTemplate === action.id}
+                    onToggle={() => {
+                      setExpandedTemplate(expandedTemplate === action.id ? null : action.id);
+                    }}
+                    onAction={'onAction' in action ? action.onAction : undefined}
+                    actionLabel={'actionLabel' in action ? action.actionLabel : undefined}
+                  />
+                ))}
               </div>
 
               {/* Input Box */}
@@ -1974,10 +1983,10 @@ export default function HomePage() {
                 </div>
               ) : (
                 <div className="grid grid-cols-4 gap-4">
-                  {mediaList.slice(0, 7).map((media) => (
+                  {mediaList.slice(0, 8).map((media) => (
                     <Link
                       key={media.id}
-                      href={`/editor/${media.id}`}
+                      href={`/editor/${media.id}?mediaId=${media.id}&mediaUrl=${encodeURIComponent(getUploadUrl(media.url || media.filePath))}`}
                       className="bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition group"
                     >
                       {/* Thumbnail */}
