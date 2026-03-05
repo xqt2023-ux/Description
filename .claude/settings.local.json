@@ -5,7 +5,19 @@
       "Bash(npm run build:*)",
       "Bash(npm run restart:*)",
       "Bash(npx tsc:*)",
-      "Bash(backend/src/services/audioEnhancement.ts << 'EOF'\n/**\n * Audio Enhancement Service \\(Studio Sound\\)\n * STATUS: STUB IMPLEMENTATION\n */\n\nexport interface AudioEnhancementResult {\n  success: boolean;\n  outputPath?: string;\n  error?: string;\n}\n\nexport async function enhanceAudio\\(\n  inputPath: string,\n  outputPath: string\n\\): Promise<AudioEnhancementResult> {\n  // TODO: Implement audio enhancement\n  return {\n    success: true,\n    outputPath,\n  };\n}\n\nexport function isAudioEnhancementEnabled\\(\\): boolean {\n  return false; // Disabled by default \\(not implemented\\)\n}\n\nexport async function getEnhancedAudioPath\\(mediaId: string\\): Promise<string | null> {\n  // TODO: Check if enhanced version exists\n  return null;\n}\nEOF)"
+      "Bash(backend/src/services/audioEnhancement.ts << 'EOF'\n/**\n * Audio Enhancement Service \\(Studio Sound\\)\n * STATUS: STUB IMPLEMENTATION\n */\n\nexport interface AudioEnhancementResult {\n  success: boolean;\n  outputPath?: string;\n  error?: string;\n}\n\nexport async function enhanceAudio\\(\n  inputPath: string,\n  outputPath: string\n\\): Promise<AudioEnhancementResult> {\n  // TODO: Implement audio enhancement\n  return {\n    success: true,\n    outputPath,\n  };\n}\n\nexport function isAudioEnhancementEnabled\\(\\): boolean {\n  return false; // Disabled by default \\(not implemented\\)\n}\n\nexport async function getEnhancedAudioPath\\(mediaId: string\\): Promise<string | null> {\n  // TODO: Check if enhanced version exists\n  return null;\n}\nEOF)",
+      "Bash(npx vitest:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: 实现interactiveEditWorkflow核心功能\n\n实现了交互式编辑工作流服务的完整业务逻辑，提供预览-确认-应用的用户体验。\n\n主要功能：\n\n1. AI驱动的工作流创建（createInteractiveWorkflow）\n   - 使用Claude AI将复杂编辑请求分解为多个可确认步骤\n   - 自动生成结构化工作流（remove_fillers/cut/trim/translate/add_music/custom）\n   - 智能降级：API不可用时使用基本解析\n\n2. 预览生成（executeWorkflowStep）\n   - Cut/Trim: 使用FFmpeg生成720p中等质量预览视频\n   - 进度跟踪和实时日志\n   - 模拟模式：文件不存在时自动降级（测试友好）\n   - 预览文件管理（previews/{workflowId}/）\n\n3. 永久性应用（confirmStep + applyStepPermanently）\n   - 用户确认：将预览复制到最终输出目录（exports/{workflowId}/）\n   - 用户拒绝：删除预览文件，回滚更改\n   - 完整的工作流状态跟踪（created → in_progress → completed）\n   - 自动检测工作流完成\n\n4. 辅助功能\n   - skipStep: 跳过当前步骤\n   - undoStep: 回退到上一步\n   - cancelWorkflow: 取消整个工作流\n   - 独立的预览/输出目录结构\n   - 完善的错误处理和清理机制\n\n技术亮点：\n- 与claude.ts和videoProcessing.ts完全集成\n- 预览使用较低分辨率/质量以提高速度\n- 优雅降级（AI不可用/文件不存在时仍可运行）\n- 76/76测试通过，0编译错误\n\n代码统计：+292行，-31行\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(npm run dev:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd /c \"taskkill /F /PID 325052\")",
+      "Bash(curl:*)",
+      "Bash(node -e:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

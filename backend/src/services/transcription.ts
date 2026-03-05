@@ -88,6 +88,44 @@ export interface TranscriptionWord {
   confidence: number;
 }
 
+/**
+ * Distribute trailing punctuation from segment.text onto individual word tokens.
+ * Whisper returns punctuation in segment.text but omits it from word-level tokens.
+ * This aligns the two, appending any punctuation that immediately follows a word
+ * in the original text onto that word's .text field.
+ */
+function distributePunctuationToWords(
+  segmentText: string,
+  words: Array<{ text: string; startTime: number; endTime: number; confidence: number }>
+): Array<{ text: string; startTime: number; endTime: number; confidence: number }> {
+  if (!words.length) return words;
+
+  const puncRe = /^[，。！？、；：""''（）【】…—,.!?;:\s]+/;
+  const result: typeof words = [];
+  let remaining = segmentText.trim();
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const wText = w.text.trim();
+    if (!wText) { result.push(w); continue; }
+
+    // Skip leading punctuation/spaces to find the word
+    const idx = remaining.indexOf(wText);
+    if (idx === -1) { result.push(w); continue; }
+
+    remaining = remaining.slice(idx + wText.length);
+
+    // Collect punctuation immediately following this word
+    const puncMatch = remaining.match(puncRe);
+    const trailing = puncMatch ? puncMatch[0].replace(/\s+/g, '') : '';
+    if (trailing) remaining = remaining.slice(puncMatch![0].length);
+
+    result.push({ ...w, text: wText + trailing });
+  }
+
+  return result;
+}
+
 // Use Groq's Whisper API (free and faster)
 export async function transcribeAudioWithGroq(
   filePath: string,
@@ -131,17 +169,19 @@ export async function transcribeAudioWithGroq(
         });
       }
       
+      const rawWords = segmentWords.map((word: any) => ({
+        text: word.word || word.text || '',
+        startTime: word.start ?? word.startTime ?? 0,
+        endTime: word.end ?? word.endTime ?? (word.start ?? 0) + 0.1,
+        confidence: word.probability ?? word.confidence ?? 1,
+      }));
+
       return {
         id: `segment-${index}`,
         text: segment.text,
         startTime: segment.start,
         endTime: segment.end,
-        words: segmentWords.map((word: any) => ({
-          text: word.word || word.text || '',
-          startTime: word.start ?? word.startTime ?? 0,
-          endTime: word.end ?? word.endTime ?? (word.start ?? 0) + 0.1,
-          confidence: word.probability ?? word.confidence ?? 1,
-        })),
+        words: distributePunctuationToWords(segment.text || '', rawWords),
       };
     }
   );

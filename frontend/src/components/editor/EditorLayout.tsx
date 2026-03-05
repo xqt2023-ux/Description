@@ -7,7 +7,6 @@ import { Timeline } from '../timeline/Timeline';
 import { Toolbar } from './Toolbar';
 import { MediaLibrary } from './MediaLibrary';
 import { InteractiveWorkflowSidebar } from './InteractiveWorkflowSidebar';
-import { useEditorStore } from '@/stores/editorStore';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 interface EditorLayoutProps {
@@ -16,15 +15,7 @@ interface EditorLayoutProps {
 
 export function EditorLayout({ projectId }: EditorLayoutProps) {
   const [showSidebar, setShowSidebar] = useState(true);
-  const [showWorkflowSidebar, setShowWorkflowSidebar] = useState(false);
-  const [workflowId, setWorkflowId] = useState<string | null>(null);
-  const { currentTime, duration, isPlaying } = useEditorStore();
-
-  const handleStartInteractiveEdit = (userRequest: string) => {
-    // This will be called from Toolbar
-    setShowWorkflowSidebar(true);
-    // WorkflowId will be set by the InteractiveWorkflowSidebar component
-  };
+  const showWorkflowSidebar = false;
 
   return (
     <div className="h-screen flex flex-col bg-editor-bg">
@@ -79,11 +70,9 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         </main>
 
         {/* Right Sidebar - Interactive Workflow */}
-        {showWorkflowSidebar && workflowId && (
+        {showWorkflowSidebar && (
           <aside className="w-96 border-l border-editor-border bg-editor-surface overflow-hidden">
-            <InteractiveWorkflowSidebar
-              workflowId={workflowId}
-            />
+            <InteractiveWorkflowSidebar />
           </aside>
         )}
       </div>

@@ -14,8 +14,8 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useEditorStore } from '@/stores/editorStore';
-import { Scissors, RotateCcw, Clock } from 'lucide-react';
-import { Word } from '@shared/types';
+import { Scissors, RotateCcw, Clock, Plus, User, Check } from 'lucide-react';
+import { Word, Speaker } from '@shared/types';
 
 interface SelectionState {
   isSelecting: boolean;
@@ -34,7 +34,83 @@ export function TranscriptEditor() {
     selectWords,
     deleteSelectedWords,
     restoreDeletedWords,
+    updateTranscript,
   } = useEditorStore();
+
+  // ── Speaker state ──────────────────────────────────────────────
+  const [speakerPopoverSegId, setSpeakerPopoverSegId] = useState<string | null>(null);
+  const [newSpeakerName, setNewSpeakerName] = useState('');
+  const [isAddingNew, setIsAddingNew] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const SPEAKER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#DDA0DD', '#F7DC6F', '#FAB1A0', '#74B9FF'];
+
+  // Close popover on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setSpeakerPopoverSegId(null);
+        setIsAddingNew(false);
+        setNewSpeakerName('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const assignSpeaker = useCallback((segmentId: string, speaker: Speaker) => {
+    if (!transcript) return;
+    updateTranscript({
+      ...transcript,
+      segments: transcript.segments.map(s =>
+        s.id === segmentId ? { ...s, speakerId: speaker.id, speakerName: speaker.customName || speaker.label } : s
+      ),
+    });
+    setSpeakerPopoverSegId(null);
+    setIsAddingNew(false);
+    setNewSpeakerName('');
+  }, [transcript, updateTranscript]);
+
+  const createAndAssign = useCallback((segmentId: string) => {
+    const name = newSpeakerName.trim();
+    if (!transcript || !name) return;
+    const existingCount = (transcript.speakers || []).length;
+    const newSpeaker: Speaker = {
+      id: `spk-${Date.now()}`,
+      label: name,
+      customName: name,
+      color: SPEAKER_COLORS[existingCount % SPEAKER_COLORS.length],
+      firstAppearance: 0,
+      totalDuration: 0,
+      segmentCount: 1,
+    };
+    updateTranscript({
+      ...transcript,
+      speakers: [...(transcript.speakers || []), newSpeaker],
+      segments: transcript.segments.map(s =>
+        s.id === segmentId ? { ...s, speakerId: newSpeaker.id, speakerName: newSpeaker.customName } : s
+      ),
+    });
+    setSpeakerPopoverSegId(null);
+    setIsAddingNew(false);
+    setNewSpeakerName('');
+  }, [transcript, newSpeakerName, updateTranscript]);
+
+  const removeSpeaker = useCallback((segmentId: string) => {
+    if (!transcript) return;
+    updateTranscript({
+      ...transcript,
+      segments: transcript.segments.map(s =>
+        s.id === segmentId ? { ...s, speakerId: undefined, speakerName: undefined } : s
+      ),
+    });
+    setSpeakerPopoverSegId(null);
+  }, [transcript, updateTranscript]);
+
+  const getSpeaker = useCallback((speakerId?: string): Speaker | undefined => {
+    if (!transcript?.speakers || !speakerId) return undefined;
+    return transcript.speakers.find(sp => sp.id === speakerId);
+  }, [transcript]);
 
   const [selection, setSelection] = useState<SelectionState>({
     isSelecting: false,
@@ -243,15 +319,119 @@ export function TranscriptEditor() {
       {/* Segments */}
       {transcript.segments.map((segment) => {
         const hasDeleted = segment.words.some((w) => w.deleted);
+        const speaker = getSpeaker(segment.speakerId);
+        const isPopoverOpen = speakerPopoverSegId === segment.id;
 
         return (
           <div key={segment.id} className="group relative">
-            {/* Speaker label */}
-            {segment.speakerId && (
-              <div className="text-xs text-primary-400 mb-1 font-medium">
-                Speaker {segment.speakerId}
-              </div>
-            )}
+
+            {/* ── Speaker label row ── */}
+            <div className="flex items-center gap-2 mb-1.5 relative">
+              {speaker ? (
+                <button
+                  onClick={() => {
+                    setSpeakerPopoverSegId(isPopoverOpen ? null : segment.id);
+                    setIsAddingNew(false);
+                    setNewSpeakerName('');
+                  }}
+                  className="flex items-center gap-1.5 text-xs font-medium hover:opacity-80 transition"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: speaker.color || '#888' }}
+                  />
+                  <span style={{ color: speaker.color || '#aaa' }}>
+                    {speaker.customName || speaker.label}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    setSpeakerPopoverSegId(isPopoverOpen ? null : segment.id);
+                    setIsAddingNew(false);
+                    setNewSpeakerName('');
+                  }}
+                  className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-400 transition"
+                >
+                  <User className="w-3 h-3" />
+                  Add speaker
+                </button>
+              )}
+
+              {/* Speaker popover */}
+              {isPopoverOpen && (
+                <div
+                  ref={popoverRef}
+                  className="absolute left-0 top-6 z-30 bg-[#1e1e1e] border border-[#333] rounded-xl shadow-2xl w-52 overflow-hidden"
+                >
+                  {/* Existing speakers */}
+                  {(transcript.speakers || []).length > 0 && (
+                    <div className="py-1 border-b border-[#2a2a2a]">
+                      {(transcript.speakers || []).map(sp => (
+                        <button
+                          key={sp.id}
+                          onClick={() => assignSpeaker(segment.id, sp)}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-[#2a2a2a] transition text-left"
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: sp.color || '#888' }}
+                          />
+                          <span className="flex-1 text-xs text-gray-200 truncate">
+                            {sp.customName || sp.label}
+                          </span>
+                          {segment.speakerId === sp.id && (
+                            <Check className="w-3 h-3 text-green-400 flex-shrink-0" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add new speaker */}
+                  {isAddingNew ? (
+                    <div className="p-2 flex gap-1">
+                      <input
+                        autoFocus
+                        value={newSpeakerName}
+                        onChange={e => setNewSpeakerName(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') createAndAssign(segment.id);
+                          if (e.key === 'Escape') { setIsAddingNew(false); setNewSpeakerName(''); }
+                        }}
+                        placeholder="Name..."
+                        className="flex-1 bg-[#2a2a2a] border border-[#444] rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-[#7c3aed]/50"
+                      />
+                      <button
+                        onClick={() => createAndAssign(segment.id)}
+                        disabled={!newSpeakerName.trim()}
+                        className="px-2 py-1 bg-[#7c3aed] text-white rounded text-xs disabled:opacity-40"
+                      >
+                        <Check className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setIsAddingNew(true)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-[#2a2a2a] transition text-left"
+                    >
+                      <Plus className="w-3 h-3 text-gray-500" />
+                      <span className="text-xs text-gray-500">Add new speaker</span>
+                    </button>
+                  )}
+
+                  {/* Remove speaker (only if assigned) */}
+                  {segment.speakerId && (
+                    <button
+                      onClick={() => removeSpeaker(segment.id)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-[#2a2a2a] transition text-left border-t border-[#2a2a2a]"
+                    >
+                      <span className="text-xs text-red-400/70 hover:text-red-400">Remove speaker</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Restore button for segment with deleted words */}
             {hasDeleted && (

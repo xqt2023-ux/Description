@@ -13,6 +13,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
+import { enhanceTranscription } from '../services/transcriptionEnhancement';
+import { storeTranscript } from '../services/dubbing';
 import fs from 'fs';
 import { 
   transcribeAudio, 
@@ -156,11 +158,39 @@ router.post('/', async (req: Request, res: Response) => {
         }
 
         // Transform segments to include speaker info
-        const segments = result.segments.map((seg, idx) => ({
+        let segments = result.segments.map((seg) => ({
           ...seg,
           speakerId: 'speaker-1',
           speakerName: 'Speaker 1',
         }));
+
+        // Apply AI punctuation enhancement if configured
+        if (process.env.BABELARK_API_KEY || process.env.OPENAI_API_KEY) {
+          try {
+            const minimalTranscript = {
+              id: transcriptionId,
+              mediaId,
+              language: result.language,
+              segments: segments as any,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            const enhancementResult = await enhanceTranscription(minimalTranscript as any);
+            if (enhancementResult.success && enhancementResult.enhancedTranscript) {
+              segments = enhancementResult.enhancedTranscript.segments as any;
+              console.log('[Transcription] Enhancement applied to legacy endpoint');
+            }
+          } catch (e: any) {
+            console.warn('[Transcription] Enhancement failed, using raw segments:', e.message);
+          }
+        }
+
+        // Persist transcript for workflow services (translate, remove_fillers, etc.)
+        storeTranscript(mediaId, {
+          text: result.text,
+          segments,
+          language: result.language,
+        });
 
         // Update transcription with results
         transcriptions[index] = {

@@ -108,11 +108,28 @@ export async function enhanceAudio(
 
     console.log(`[AudioEnhancement] Applying filters: ${filterComplex}`);
 
+    // Detect if input is a video file (needs video stream preserved)
+    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v'];
+    const inputExt = path.extname(inputPath).toLowerCase();
+    const isVideo = videoExtensions.includes(inputExt);
+
     // Execute FFmpeg enhancement
     await new Promise<void>((resolve, reject) => {
-      let command = ffmpeg(inputPath)
-        .audioCodec('libmp3lame')
-        .audioBitrate('192k');
+      let command = ffmpeg(inputPath);
+
+      if (isVideo) {
+        // For video files: copy video stream unchanged, re-encode audio to AAC (MP4-compatible)
+        command = command
+          .videoCodec('copy')
+          .audioCodec('aac')
+          .audioBitrate('192k');
+      } else {
+        // For audio-only files: encode to MP3
+        command = command
+          .audioCodec('libmp3lame')
+          .audioBitrate('192k')
+          .noVideo();
+      }
 
       if (filterComplex) {
         command = command.audioFilters(filterComplex);

@@ -10,6 +10,8 @@ interface TemplateWorkflowCardProps {
   completion: string;
   isExpanded: boolean;
   onToggle: () => void;
+  onAction?: () => void;
+  actionLabel?: string;
 }
 
 export default function TemplateWorkflowCard({
@@ -21,6 +23,8 @@ export default function TemplateWorkflowCard({
   completion,
   isExpanded,
   onToggle,
+  onAction,
+  actionLabel = 'Get started',
 }: TemplateWorkflowCardProps) {
   return (
     <div className="w-full max-w-4xl mx-auto">
@@ -61,6 +65,16 @@ export default function TemplateWorkflowCard({
           <div className="pt-4 border-t border-purple-200">
             <p className="text-sm text-gray-600 italic">{completion}</p>
           </div>
+          {onAction && (
+            <div className="mt-4">
+              <button
+                onClick={onAction}
+                className="px-5 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition"
+              >
+                {actionLabel}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

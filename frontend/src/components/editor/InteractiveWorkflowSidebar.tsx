@@ -215,7 +215,7 @@ export function InteractiveWorkflowSidebar() {
             <p className="text-[10px] text-gray-500 mt-0.5">AI Video Editor</p>
           </div>
         </div>
-        {phase !== 'idle' && (
+        {(phase === 'planning' || phase === 'executing') && (
           <button
             onClick={phase === 'executing' ? cancelWorkflow : reset}
             className="text-xs text-gray-500 hover:text-gray-300 transition"

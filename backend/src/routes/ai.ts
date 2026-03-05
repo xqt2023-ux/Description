@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import { Errors } from '../middleware/errorHandler';
 import { asyncHandler } from '../utils/asyncHandler';
 import {
@@ -629,10 +631,10 @@ router.post('/workflow/create', async (req: Request, res: Response) => {
       });
     }
 
-    if (!mediaInfo || !mediaInfo.duration) {
+    if (!mediaInfo) {
       return res.status(400).json({
         success: false,
-        error: 'Media info with duration is required',
+        error: 'mediaInfo is required',
       });
     }
 
@@ -645,10 +647,21 @@ router.post('/workflow/create', async (req: Request, res: Response) => {
       });
     }
 
+    // Resolve the local file path so step execution can find the video
+    let mediaFilePath: string | undefined;
+    if (media?.url) {
+      const urlPath = (media.url as string)
+        .replace(/^https?:\/\/[^/]+/, '')
+        .replace(/^\//, '');
+      const candidate = path.join(process.cwd(), urlPath);
+      if (fs.existsSync(candidate)) mediaFilePath = candidate;
+    }
+
     const workflow = await createInteractiveWorkflow(
       userRequest,
       mediaId,
-      mediaInfo as MediaInfo
+      mediaInfo as MediaInfo,
+      mediaFilePath
     );
 
     res.json({
@@ -666,6 +679,40 @@ router.post('/workflow/create', async (req: Request, res: Response) => {
       success: false,
       error: error.message || 'Failed to create workflow',
     });
+  }
+});
+
+/**
+ * GET /api/ai/workflow/list
+ * 获取所有工作流
+ * NOTE: must be defined before /workflow/:workflowId to avoid being shadowed
+ */
+router.get('/workflow/list', (_req: Request, res: Response) => {
+  try {
+    const workflows = getAllWorkflows();
+    res.json({ success: true, data: { workflows } });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Failed to list workflows' });
+  }
+});
+
+/**
+ * GET /api/workflow/preview/:filename
+ * 服务预览视频文件
+ * NOTE: must be defined before /workflow/:workflowId to avoid being shadowed
+ */
+router.get('/workflow/preview/:filename', (req: Request, res: Response) => {
+  try {
+    const { filename } = req.params;
+    const pathMod = require('path');
+    const fsMod = require('fs');
+    const filePath = pathMod.join('uploads', 'previews', filename);
+    if (!fsMod.existsSync(filePath)) {
+      return res.status(404).json({ success: false, error: 'Preview not found' });
+    }
+    res.sendFile(pathMod.resolve(filePath));
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Failed to serve preview' });
   }
 });
 
@@ -862,26 +909,6 @@ router.post('/workflow/:workflowId/cancel', (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/ai/workflow/list
- * 获取所有工作流
- */
-router.get('/workflow/list', (req: Request, res: Response) => {
-  try {
-    const workflows = getAllWorkflows();
-
-    res.json({
-      success: true,
-      data: { workflows },
-    });
-  } catch (error: any) {
-    console.error('List workflows error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to list workflows',
-    });
-  }
-});
 
 /**
  * DELETE /api/ai/workflow/:workflowId
@@ -913,33 +940,5 @@ router.delete('/workflow/:workflowId', (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/workflow/preview/:filename
- * 服务预览视频文件
- */
-router.get('/workflow/preview/:filename', (req: Request, res: Response) => {
-  try {
-    const { filename } = req.params;
-    const path = require('path');
-    const fs = require('fs');
-    
-    const filePath = path.join('uploads', 'previews', filename);
-    
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({
-        success: false,
-        error: 'Preview not found'
-      });
-    }
-
-    res.sendFile(path.resolve(filePath));
-  } catch (error: any) {
-    console.error('Serve preview error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to serve preview',
-    });
-  }
-});
 
 export { router as aiRoutes };

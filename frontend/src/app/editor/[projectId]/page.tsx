@@ -17,12 +17,13 @@ function EditorContent() {
   const [isWaitingForFile, setIsWaitingForFile] = useState(hasFile);
 
   // 读取自动编辑需求，读完立刻清除避免刷新后重复执行
-  const [autoEditRequest] = useState<string | undefined>(() => {
-    if (typeof window === 'undefined') return undefined;
+  // 用 useEffect 而非 useState 懒初始化，避免 Next.js SSR 时 window 不存在导致值丢失
+  const [autoEditRequest, setAutoEditRequest] = useState<string | undefined>(undefined);
+  useEffect(() => {
     const req = sessionStorage.getItem('pendingAutoEdit') || undefined;
     sessionStorage.removeItem('pendingAutoEdit');
-    return req;
-  });
+    if (req) setAutoEditRequest(req);
+  }, []);
   
   // 从首页获取待处理的文件
   useEffect(() => {

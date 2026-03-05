@@ -4,8 +4,22 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 // Get the base URL for static files (uploads)
 export const getUploadUrl = (path: string): string => {
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('blob:')) {
+  if (path.startsWith('blob:')) {
     return path;
+  }
+  // If it's an absolute URL, replace the host+port with the current API base
+  // (handles stale registry entries saved with old port numbers)
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    try {
+      const url = new URL(path);
+      const apiUrl = new URL(API_BASE_URL);
+      url.hostname = apiUrl.hostname;
+      url.port = apiUrl.port;
+      url.protocol = apiUrl.protocol;
+      return url.toString();
+    } catch {
+      return path;
+    }
   }
   return `${API_BASE_URL}${path}`;
 };

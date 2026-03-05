@@ -110,6 +110,12 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
   const audioContextRef = useRef<AudioContext | null>(null);
   const autoEditExecuted = useRef(false);
   const pendingAutoEditRef = useRef<string | undefined>(autoEditRequest);
+  // autoEditRequest 来自 useEffect（客户端），初始渲染时为 undefined，需要同步 ref
+  useEffect(() => {
+    if (autoEditRequest && !pendingAutoEditRef.current) {
+      pendingAutoEditRef.current = autoEditRequest;
+    }
+  }, [autoEditRequest]);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const [audioData, setAudioData] = useState<number[]>([]);
   const [videoAspect, setVideoAspect] = useState<'landscape' | 'portrait' | 'square'>('landscape');
