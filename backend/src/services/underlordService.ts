@@ -10,7 +10,12 @@
 import OpenAI from 'openai';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { MediaInfo } from './videoEditOrchestration';
-import { executeRemoveFillers } from './editExecutors';
+import {
+  executeRemoveFillers,
+  executeCutSegment,
+  executeRemoveSilence,
+  executeRemoveBlackScreens,
+} from './editExecutors';
 
 // ── Event protocol ─────────────────────────────────────────────────────────────
 
@@ -215,12 +220,15 @@ async function executeAction(
       return executeRemoveFillers(mediaId, action.params.customWords);
 
     case 'cut_segment':
-      return [{ startTime: action.params.startTime, endTime: action.params.endTime }];
+      return executeCutSegment(action.params.startTime, action.params.endTime);
 
     case 'remove_silence':
+      if (!_mediaFilePath) throw new Error('媒体文件路径未知，无法检测静默');
+      return executeRemoveSilence(_mediaFilePath, action.params.threshold, action.params.minDuration);
+
     case 'remove_black_screens':
-      // Phase 2: FFmpeg-based detection — not yet implemented
-      throw new Error(`"${ACTION_LABELS[action.type]}" 功能即将推出`);
+      if (!_mediaFilePath) throw new Error('媒体文件路径未知，无法检测黑屏');
+      return executeRemoveBlackScreens(_mediaFilePath, action.params.minDuration, action.params.threshold);
 
     default:
       throw new Error('未知操作类型');

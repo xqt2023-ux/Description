@@ -5,6 +5,7 @@
  * All downstream pipeline (patch → transcript → VideoPlayer) is unified.
  */
 
+import { spawn } from 'child_process';
 import { getStoredTranscript } from './dubbing';
 
 export interface CutRegion {
@@ -72,4 +73,91 @@ export async function executeRemoveFillers(
   }
 
   return mergeAdjacentRegions(regions, 0.1);
+}
+
+// ── cut_segment ────────────────────────────────────────────────────────────
+
+export async function executeCutSegment(
+  startTime: number,
+  endTime: number
+): Promise<CutRegion[]> {
+  return [{ startTime, endTime }];
+}
+
+// ── FFmpeg stderr helpers ──────────────────────────────────────────────────
+
+function runFFmpeg(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args);
+    let stderr = '';
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    proc.on('close', (code) => {
+      // silencedetect and blackdetect write results to stderr even on exit code 1
+      resolve(stderr);
+    });
+    proc.on('error', reject);
+  });
+}
+
+export function parseSilenceOutput(stderr: string): CutRegion[] {
+  const regions: CutRegion[] = [];
+  let pendingStart: number | null = null;
+
+  for (const line of stderr.split('\n')) {
+    const startMatch = line.match(/silence_start:\s*([\d.]+)/);
+    if (startMatch) {
+      pendingStart = parseFloat(startMatch[1]);
+      continue;
+    }
+    const endMatch = line.match(/silence_end:\s*([\d.]+)/);
+    if (endMatch && pendingStart !== null) {
+      regions.push({ startTime: pendingStart, endTime: parseFloat(endMatch[1]) });
+      pendingStart = null;
+    }
+  }
+
+  return regions;
+}
+
+export function parseBlackDetectOutput(stderr: string): CutRegion[] {
+  const regions: CutRegion[] = [];
+
+  for (const line of stderr.split('\n')) {
+    const match = line.match(/black_start:([\d.]+)\s+black_end:([\d.]+)/);
+    if (match) {
+      regions.push({ startTime: parseFloat(match[1]), endTime: parseFloat(match[2]) });
+    }
+  }
+
+  return regions;
+}
+
+// ── remove_silence ─────────────────────────────────────────────────────────
+
+export async function executeRemoveSilence(
+  mediaFilePath: string,
+  threshold = -40,
+  minDuration = 0.5
+): Promise<CutRegion[]> {
+  const stderr = await runFFmpeg([
+    '-i', mediaFilePath,
+    '-af', `silencedetect=n=${threshold}dB:d=${minDuration}`,
+    '-f', 'null', '-',
+  ]);
+  return parseSilenceOutput(stderr);
+}
+
+// ── remove_black_screens ────────────────────────────────────────────────────
+
+export async function executeRemoveBlackScreens(
+  mediaFilePath: string,
+  minDuration = 0.5,
+  threshold = 0.1
+): Promise<CutRegion[]> {
+  const stderr = await runFFmpeg([
+    '-i', mediaFilePath,
+    '-vf', `blackdetect=d=${minDuration}:pix_th=${threshold}`,
+    '-f', 'null', '-',
+  ]);
+  return parseBlackDetectOutput(stderr);
 }
