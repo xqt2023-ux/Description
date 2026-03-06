@@ -308,6 +308,123 @@ function buildFFmpegFilter(duration: number, cuts: CutRegion[]): string {
 
 ---
 
+## Overlay 子系统（Phase 4）
+
+### 数据模型
+
+```typescript
+interface OverlayItem {
+  id: string;
+  type: 'image' | 'text';
+
+  // 时间范围（输出时间线上，-1 表示持续到结尾）
+  startTime: number;
+  endTime: number;
+
+  // 位置（相对视频画面，字符串枚举）
+  position: 'top-left' | 'top-center' | 'top-right'
+           | 'center'
+           | 'bottom-left' | 'bottom-center' | 'bottom-right';
+
+  // 图片 overlay 专有
+  imageUrl?: string;     // 上传后的文件路径（由 assetId 解析得到）
+  width?: number;        // 占画面宽度比例 0-1，默认 0.2
+  opacity?: number;      // 透明度 0-1，默认 1
+
+  // 文字 overlay 专有
+  text?: string;
+  fontSize?: number;     // px，默认 48
+  color?: string;        // 默认 '#ffffff'
+  fontFamily?: string;   // 默认 'sans-serif'
+  animation?: 'none' | 'fade' | 'typewriter';
+}
+```
+
+TimelinePatch 扩展（已在类型定义中，Phase 4 实现）：
+```typescript
+{ op: 'add_overlay';    overlay: Omit<OverlayItem, 'id'> }
+{ op: 'remove_overlay'; overlayId: string }
+```
+
+### Function Calling 工具
+
+```typescript
+// add_text_overlay
+{
+  name: 'add_text_overlay',
+  description: '在视频指定时间段叠加文字（标题、字幕、花字）',
+  parameters: {
+    text: string,
+    startTime: number,
+    endTime: number,           // -1 = 持续到结尾
+    position?: string,         // 默认 'bottom-center'
+    fontSize?: number,
+    color?: string,
+    animation?: 'none' | 'fade' | 'typewriter',
+  }
+}
+
+// add_image_overlay
+{
+  name: 'add_image_overlay',
+  description: '在视频指定时间段叠加图片或 Logo',
+  parameters: {
+    assetId: string,           // 已上传资产 ID
+    startTime: number,
+    endTime: number,           // -1 = 持续到结尾
+    position?: string,         // 默认 'bottom-right'
+    width?: number,            // 占画面宽度比例 0-1，默认 0.2
+    opacity?: number,
+  }
+}
+```
+
+**图片资产流程**：用户先上传 logo/图片（复用现有媒体上传接口，返回 assetId），然后在对话中引用 assetId。
+
+### OverlayRenderer（前端，新建）
+
+绝对定位叠加在 `<video>` 上方，从 `editorStore.timeline.overlays` 读取，用 `currentTime` 过滤当前帧内有效的 overlay：
+
+```tsx
+// frontend/src/components/editor/OverlayRenderer.tsx
+const POSITION_STYLE: Record<string, React.CSSProperties> = {
+  'top-left':      { top: '5%', left: '5%' },
+  'top-center':    { top: '5%', left: '50%', transform: 'translateX(-50%)' },
+  'top-right':     { top: '5%', right: '5%' },
+  'center':        { top: '50%', left: '50%', transform: 'translate(-50%,-50%)' },
+  'bottom-left':   { bottom: '5%', left: '5%' },
+  'bottom-center': { bottom: '5%', left: '50%', transform: 'translateX(-50%)' },
+  'bottom-right':  { bottom: '5%', right: '5%' },
+};
+```
+
+### FFmpeg 导出合成
+
+文字 overlay（FFmpeg drawtext filter）：
+```bash
+ffmpeg -i video.mp4 \
+  -vf "drawtext=text='第一章':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=50:enable='between(t,5,10)'" \
+  output.mp4
+```
+
+图片 overlay（FFmpeg overlay filter）：
+```bash
+ffmpeg -i video.mp4 -i logo.png \
+  -filter_complex "overlay=W-w-20:H-h-20:enable='between(t,0,60)'" \
+  output.mp4
+```
+
+多个 overlay 时链式拼接 filter_complex。
+
+### Phase 4 实现路线
+
+| Phase | 内容 | 估计工作量 |
+|-------|------|-----------|
+| **4a** | 文字 overlay：add_text_overlay executor + applyPatch 分支 + OverlayRenderer（文字部分）+ FFmpeg drawtext 导出 | ~200 行 |
+| **4b** | 图片 overlay：资产上传接口 + add_image_overlay executor + OverlayRenderer（图片部分）+ FFmpeg overlay 导出 | ~200 行 |
+
+---
+
 ## 兼容性
 
 | 现有功能 | 影响 |
