@@ -132,6 +132,36 @@ export function parseBlackDetectOutput(stderr: string): CutRegion[] {
   return regions;
 }
 
+// ── invertCuts ─────────────────────────────────────────────────────────────
+
+/**
+ * Convert cut regions (segments to remove) into keep regions (segments to keep).
+ * Used by the export layer to build FFmpeg trim+concat filters.
+ */
+export function invertCuts(
+  duration: number,
+  cuts: { startTime: number; endTime: number }[],
+): { startTime: number; endTime: number }[] {
+  if (cuts.length === 0) return [{ startTime: 0, endTime: duration }];
+
+  const sorted = [...cuts].sort((a, b) => a.startTime - b.startTime);
+  const result: { startTime: number; endTime: number }[] = [];
+  let pos = 0;
+
+  for (const cut of sorted) {
+    if (cut.startTime > pos) {
+      result.push({ startTime: pos, endTime: cut.startTime });
+    }
+    pos = cut.endTime;
+  }
+
+  if (pos < duration) {
+    result.push({ startTime: pos, endTime: duration });
+  }
+
+  return result;
+}
+
 // ── remove_silence ─────────────────────────────────────────────────────────
 
 export async function executeRemoveSilence(

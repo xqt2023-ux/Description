@@ -30,6 +30,7 @@ interface CutRegion {
 
 export function VideoPlayer() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const {
     currentTime,
     duration,
@@ -37,6 +38,7 @@ export function VideoPlayer() {
     volume,
     isMuted,
     videoUrl,
+    dubbingAudioUrl,
     transcript,
     seekVersion,
     setCurrentTime,
@@ -141,6 +143,25 @@ export function VideoPlayer() {
     }
   }, [isPlaying, setIsPlaying]);
 
+  // Sync dubbed audio play/pause with video
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !dubbingAudioUrl) return;
+    if (isPlaying) {
+      audio.play().catch(() => {});
+    } else {
+      audio.pause();
+    }
+  }, [isPlaying, dubbingAudioUrl]);
+
+  // Sync dubbed audio seek with video seeks
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !dubbingAudioUrl || seekVersion === 0) return;
+    const state = useEditorStore.getState();
+    audio.currentTime = state.currentTime;
+  }, [seekVersion, dubbingAudioUrl]);
+
   const togglePlay = useCallback(() => {
     console.log('togglePlay called, isPlaying:', isPlaying);
     setIsPlaying(!isPlaying);
@@ -191,7 +212,14 @@ export function VideoPlayer() {
               togglePlay();
             }}
           />
-        ) : (
+        ) : null}
+
+        {/* Hidden dubbed audio track — plays in sync with video */}
+        {dubbingAudioUrl && (
+          <audio ref={audioRef} src={dubbingAudioUrl} preload="auto" />
+        )}
+
+        {!videoUrl && (
           <div className="absolute inset-0 flex items-center justify-center text-editor-muted">
             <div className="text-center">
               <Play className="w-16 h-16 mx-auto mb-4 opacity-50" />

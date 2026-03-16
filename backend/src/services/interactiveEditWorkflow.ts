@@ -290,7 +290,7 @@ async function handleCut(ctx: ToolContext): Promise<PreviewInfo> {
     type: 'video',
     url: `/previews/${path.basename(previewDir)}/${path.basename(previewPath)}`,
     content: `Cut segment ${startTime}s – ${endTime}s (${endTime - startTime}s removed)`,
-    metadata: { operation: 'cut', startTime, endTime },
+    metadata: { operation: 'cut', startTime, endTime, cutRegions: [{ startTime, endTime }] },
   };
 }
 
@@ -319,7 +319,7 @@ async function handleTrim(ctx: ToolContext): Promise<PreviewInfo> {
     type: 'video',
     url: `/previews/${path.basename(previewDir)}/${path.basename(previewPath)}`,
     content: `Trimmed to ${startTime}s – ${endTime}s (${endTime - startTime}s kept)`,
-    metadata: { operation: 'trim', startTime, endTime },
+    metadata: { operation: 'trim', startTime, endTime, cutRegions },
   };
 }
 

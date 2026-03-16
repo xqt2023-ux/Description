@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { exportApi } from '@/lib/api';
+import React, { useState, useRef, useCallback } from 'react';
+import { underlordApi } from '@/lib/api';
 import { useEditorStore } from '@/stores/editorStore';
 
 interface ExportDialogProps {
@@ -10,265 +10,149 @@ interface ExportDialogProps {
   onClose: () => void;
 }
 
-type ExportFormat = 'mp4' | 'webm' | 'gif';
-type ExportResolution = '2160p' | '1080p' | '720p' | '480p';
-type ExportQuality = 'high' | 'medium' | 'low';
 type ExportStatus = 'idle' | 'exporting' | 'completed' | 'failed' | 'cancelled';
 
 interface ExportProgress {
   percent: number;
   phase: string;
   currentOperation: string;
-  timeRemaining?: number;
 }
 
 /**
- * T035: Export Dialog with format/quality options
- * T036: Export progress indicator with cancel support  
- * T037: Export job polling and download trigger
+ * Export Dialog — streams FFmpeg export progress via Underlord SSE endpoint.
+ * Uses POST /api/ai/underlord/export with cut regions derived from deleted transcript words.
  */
 export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) {
-  // Export options
-  const [format, setFormat] = useState<ExportFormat>('mp4');
-  const [resolution, setResolution] = useState<ExportResolution>('1080p');
-  const [quality, setQuality] = useState<ExportQuality>('high');
-
   // Export state
   const [status, setStatus] = useState<ExportStatus>('idle');
-  const [progress, setProgress] = useState<ExportProgress>({
-    percent: 0,
-    phase: '',
-    currentOperation: '',
-  });
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ExportProgress>({ percent: 0, phase: '', currentOperation: '' });
   const [error, setError] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // Get cut regions from store
+  // Get mediaId and transcript from store
+  const mediaId = useEditorStore((state) => state.mediaFiles[0]?.id);
   const transcript = useEditorStore((state) => state.transcript);
 
   // Derive cut regions from deleted words
   const getCutRegions = useCallback(() => {
     if (!transcript?.segments) return [];
-
-    // Flatten all words from all segments
-    const allWords = transcript.segments.flatMap(segment => 
-      segment.words.map(word => ({
-        ...word,
-        start: word.startTime,
-        end: word.endTime,
-      }))
-    );
-
-    if (allWords.length === 0) return [];
-
     const regions: Array<{ startTime: number; endTime: number }> = [];
     let regionStart: number | null = null;
+
+    const allWords = transcript.segments.flatMap(seg =>
+      seg.words.map(w => ({ startTime: w.startTime, endTime: w.endTime, deleted: w.deleted }))
+    );
 
     for (let i = 0; i < allWords.length; i++) {
       const word = allWords[i];
       if (word.deleted) {
-        if (regionStart === null) {
-          regionStart = word.start;
-        }
+        if (regionStart === null) regionStart = word.startTime;
       } else {
         if (regionStart !== null) {
-          const lastDeletedWord = allWords[i - 1];
-          regions.push({
-            startTime: regionStart,
-            endTime: lastDeletedWord.end,
-          });
+          regions.push({ startTime: regionStart, endTime: allWords[i - 1].endTime });
           regionStart = null;
         }
       }
     }
-
-    // Handle trailing deleted words
-    if (regionStart !== null) {
-      const lastWord = allWords[allWords.length - 1];
-      regions.push({
-        startTime: regionStart,
-        endTime: lastWord.end,
-      });
+    if (regionStart !== null && allWords.length > 0) {
+      regions.push({ startTime: regionStart, endTime: allWords[allWords.length - 1].endTime });
     }
-
     return regions;
   }, [transcript]);
 
-  // Start export
+  // Start export — streams SSE from Underlord export endpoint
   const handleStartExport = async () => {
+    if (!mediaId) return;
     setStatus('exporting');
     setError(null);
+    setDownloadUrl(null);
     setProgress({ percent: 0, phase: 'starting', currentOperation: 'Initializing export...' });
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const cutRegions = getCutRegions();
-      
-      const response = await exportApi.startJob(projectId, {
-        cutRegions,
-        format,
-        resolution,
-        quality,
-      });
+      const response = await underlordApi.export(mediaId, getCutRegions());
+      if (!response.body) throw new Error('No response body');
 
-      const newJobId = response.data.data.jobId;
-      setJobId(newJobId);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      // Start SSE streaming for real-time progress
-      const eventSource = exportApi.createJobStream(newJobId);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      eventSource.addEventListener('progress', (event) => {
-        const data = JSON.parse(event.data);
-        setProgress({
-          percent: data.progress.percent,
-          phase: data.progress.phase,
-          currentOperation: data.progress.currentOperation,
-          timeRemaining: data.progress.timeRemaining,
-        });
-      });
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() ?? '';
 
-      eventSource.addEventListener('complete', (event) => {
-        const data = JSON.parse(event.data);
-        setStatus('completed');
-        setProgress({ percent: 100, phase: 'complete', currentOperation: 'Export complete!' });
-        setDownloadUrl(data.outputUrl);
-        eventSource.close();
-      });
-
-      eventSource.addEventListener('error', (event) => {
-        try {
-          const data = JSON.parse((event as any).data);
-          setStatus('failed');
-          setError(data.error || 'Export failed');
-        } catch {
-          setStatus('failed');
-          setError('Connection lost during export');
+        for (const chunk of chunks) {
+          const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
+          if (!dataLine) continue;
+          try {
+            const event = JSON.parse(dataLine.slice(6));
+            if (event.type === 'progress') {
+              setProgress({
+                percent: event.percent ?? 0,
+                phase: 'encoding',
+                currentOperation: event.operation || 'Processing...',
+              });
+            } else if (event.type === 'done') {
+              setStatus('completed');
+              setDownloadUrl(event.downloadUrl);
+              setProgress({ percent: 100, phase: 'complete', currentOperation: 'Export complete!' });
+            } else if (event.type === 'error') {
+              setStatus('failed');
+              setError(event.message || 'Export failed');
+            }
+          } catch {
+            // malformed event — skip
+          }
         }
-        eventSource.close();
-      });
-
-      eventSource.onerror = () => {
-        // SSE connection error - fall back to polling
-        eventSource.close();
-        pollExportStatus(newJobId);
-      };
-
-    } catch (err: any) {
-      setStatus('failed');
-      setError(err.response?.data?.error || err.message || 'Failed to start export');
-    }
-  };
-
-  // Polling fallback for SSE failures
-  const pollExportStatus = async (pollJobId: string) => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const response = await exportApi.getJobStatus(pollJobId);
-        const job = response.data.data;
-
-        setProgress({
-          percent: job.progress,
-          phase: job.phase,
-          currentOperation: job.currentOperation,
-        });
-
-        if (job.status === 'completed') {
-          setStatus('completed');
-          setDownloadUrl(job.outputUrl);
-          clearInterval(pollInterval);
-        } else if (job.status === 'failed') {
-          setStatus('failed');
-          setError(job.error || 'Export failed');
-          clearInterval(pollInterval);
-        } else if (job.status === 'cancelled') {
-          setStatus('cancelled');
-          clearInterval(pollInterval);
-        }
-      } catch (err) {
-        console.error('Poll error:', err);
-        clearInterval(pollInterval);
-        setStatus('failed');
-        setError('Lost connection to export service');
       }
-    }, 1000);
-
-    // Cleanup on unmount
-    return () => clearInterval(pollInterval);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setStatus('failed');
+        setError(err.message || 'Export failed');
+      }
+    }
   };
 
   // Cancel export
-  const handleCancel = async () => {
-    if (!jobId) return;
-
-    try {
-      await exportApi.cancelJob(jobId);
-      setStatus('cancelled');
-    } catch (err) {
-      console.error('Cancel error:', err);
-    }
+  const handleCancel = () => {
+    abortRef.current?.abort();
+    setStatus('cancelled');
   };
 
-  // Download exported file
-  const handleDownload = async () => {
-    if (!jobId) return;
-
-    try {
-      const response = await exportApi.download(jobId);
-      const blob = response.data;
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `export_${projectId}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      setError(err.message || 'Download failed');
-    }
+  // Trigger browser download
+  const handleDownload = () => {
+    if (!downloadUrl) return;
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = `export_${projectId}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
-  // Reset state on close
+  // Reset on close
   const handleClose = () => {
     if (status === 'exporting') {
-      // Confirm cancellation
-      if (!confirm('Export in progress. Cancel and close?')) {
-        return;
-      }
+      if (!confirm('Export in progress. Cancel and close?')) return;
       handleCancel();
     }
     setStatus('idle');
     setProgress({ percent: 0, phase: '', currentOperation: '' });
-    setJobId(null);
     setError(null);
     setDownloadUrl(null);
     onClose();
   };
 
-  // Format estimated time remaining
-  const formatTimeRemaining = (seconds?: number) => {
-    if (!seconds) return '';
-    if (seconds < 60) return `${Math.round(seconds)}s remaining`;
-    return `${Math.round(seconds / 60)}m ${Math.round(seconds % 60)}s remaining`;
-  };
-
-  // Estimate file size
-  const estimateFileSize = () => {
-    const qualityMultiplier = { high: 1, medium: 0.6, low: 0.3 }[quality];
-    const resolutionMultiplier = { '2160p': 4, '1080p': 1, '720p': 0.5, '480p': 0.25 }[resolution];
-    const formatMultiplier = { mp4: 1, webm: 0.8, gif: 3 }[format];
-    
-    // Base estimate: 10MB per minute at 1080p high quality
-    const durationMinutes = 1; // Would need actual duration
-    const baseMB = 10 * durationMinutes;
-    const estimatedMB = baseMB * qualityMultiplier * resolutionMultiplier * formatMultiplier;
-    
-    if (estimatedMB < 1) return `~${Math.round(estimatedMB * 1024)} KB`;
-    if (estimatedMB > 1024) return `~${(estimatedMB / 1024).toFixed(1)} GB`;
-    return `~${Math.round(estimatedMB)} MB`;
-  };
-
   if (!isOpen) return null;
+
+  const cutRegions = getCutRegions();
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -276,11 +160,7 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-xl font-semibold text-white">Export Video</h2>
-          <button
-            onClick={handleClose}
-            className="text-gray-400 hover:text-white transition-colors"
-            aria-label="Close"
-          >
+          <button onClick={handleClose} className="text-gray-400 hover:text-white transition-colors" aria-label="Close">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -288,97 +168,34 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
         </div>
 
         {status === 'idle' ? (
-          /* Export Options Form */
           <div className="space-y-6">
-            {/* Format Selection */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Format</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(['mp4', 'webm', 'gif'] as ExportFormat[]).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setFormat(f)}
-                    className={`py-2 px-4 rounded-lg text-sm font-medium transition-colors ${
-                      format === f
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {f.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                {format === 'mp4' && 'Best compatibility, recommended for most uses'}
-                {format === 'webm' && 'Smaller file size, good for web'}
-                {format === 'gif' && 'Animated image, no audio'}
-              </p>
-            </div>
-
-            {/* Resolution Selection */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Resolution</label>
-              <div className="grid grid-cols-4 gap-2">
-                {(['2160p', '1080p', '720p', '480p'] as ExportResolution[]).map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => setResolution(r)}
-                    className={`py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
-                      resolution === r
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Quality Selection */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Quality</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(['high', 'medium', 'low'] as ExportQuality[]).map((q) => (
-                  <button
-                    key={q}
-                    onClick={() => setQuality(q)}
-                    className={`py-2 px-4 rounded-lg text-sm font-medium capitalize transition-colors ${
-                      quality === q
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Cut Regions Info */}
-            {getCutRegions().length > 0 && (
+            {/* Cut Regions Summary */}
+            {cutRegions.length > 0 ? (
               <div className="bg-gray-800 rounded-lg p-3">
                 <p className="text-sm text-gray-300">
-                  <span className="text-yellow-400">✂️</span> {getCutRegions().length} cut region(s) will be removed
+                  <span className="text-yellow-400">✂</span> {cutRegions.length} cut region(s) will be removed
                 </p>
+              </div>
+            ) : (
+              <div className="bg-gray-800 rounded-lg p-3">
+                <p className="text-sm text-gray-400">No cuts applied — exports full video</p>
               </div>
             )}
 
-            {/* Estimated Size */}
-            <div className="text-sm text-gray-400">
-              Estimated file size: {estimateFileSize()}
-            </div>
+            {/* Media check */}
+            {!mediaId && (
+              <p className="text-sm text-yellow-400">Upload a video first to export.</p>
+            )}
 
-            {/* Export Button */}
             <button
               onClick={handleStartExport}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+              disabled={!mediaId}
+              className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors"
             >
               Start Export
             </button>
           </div>
         ) : (
-          /* Export Progress */
           <div className="space-y-6">
             {/* Status Badge */}
             <div className="flex items-center gap-2">
@@ -408,12 +225,7 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
                 </span>
               )}
               {status === 'cancelled' && (
-                <span className="flex items-center gap-2 text-yellow-400">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-                  </svg>
-                  Export Cancelled
-                </span>
+                <span className="flex items-center gap-2 text-yellow-400">Cancelled</span>
               )}
             </div>
 
@@ -430,62 +242,39 @@ export function ExportDialog({ projectId, isOpen, onClose }: ExportDialogProps) 
                     style={{ width: `${progress.percent}%` }}
                   />
                 </div>
-                {progress.timeRemaining && (
-                  <p className="text-xs text-gray-500 mt-2">
-                    {formatTimeRemaining(progress.timeRemaining)}
-                  </p>
-                )}
               </div>
             )}
 
-            {/* Error Message */}
+            {/* Error */}
             {error && (
               <div className="bg-red-900/30 border border-red-500 rounded-lg p-3">
                 <p className="text-sm text-red-300">{error}</p>
               </div>
             )}
 
-            {/* Action Buttons */}
+            {/* Actions */}
             <div className="flex gap-3">
               {status === 'exporting' && (
-                <button
-                  onClick={handleCancel}
-                  className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-                >
+                <button onClick={handleCancel} className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">
                   Cancel
                 </button>
               )}
               {status === 'completed' && (
                 <>
-                  <button
-                    onClick={handleDownload}
-                    className="flex-1 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors"
-                  >
+                  <button onClick={handleDownload} className="flex-1 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors">
                     Download
                   </button>
-                  <button
-                    onClick={handleClose}
-                    className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-                  >
+                  <button onClick={handleClose} className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">
                     Close
                   </button>
                 </>
               )}
               {(status === 'failed' || status === 'cancelled') && (
                 <>
-                  <button
-                    onClick={() => {
-                      setStatus('idle');
-                      setError(null);
-                    }}
-                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-                  >
+                  <button onClick={() => { setStatus('idle'); setError(null); }} className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
                     Try Again
                   </button>
-                  <button
-                    onClick={handleClose}
-                    className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
-                  >
+                  <button onClick={handleClose} className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">
                     Close
                   </button>
                 </>

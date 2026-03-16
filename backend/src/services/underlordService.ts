@@ -1,23 +1,45 @@
 /**
  * Underlord Service
  *
- * Two-layer architecture:
- * 1. Conversational response — streams natural language via OpenAI-compatible API
- * 2. Intent parsing — function calling to detect edit action
- * 3. Executor — produces cutRegions[], emits TimelinePatch via SSE
+ * Fully generic — all tool knowledge lives in the ToolRegistry.
+ * To add a new editing capability: create a .tool.ts file, register it,
+ * and this service picks it up automatically with zero changes here.
+ *
+ * Architecture:
+ *  1. Stream conversational response (natural language only, no JSON)
+ *  2. Parse intent via function calling → toolRegistry.execute()
+ *     - LLM may also call ask_question to collect a missing parameter
+ *  3. Fallback: toolRegistry.fallbackMatch() (keyword matching)
+ *  4. Unknown intent → log + inform user of supported operations
  */
 
 import OpenAI from 'openai';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { MediaInfo } from './videoEditOrchestration';
-import {
-  executeRemoveFillers,
-  executeCutSegment,
-  executeRemoveSilence,
-  executeRemoveBlackScreens,
-} from './editExecutors';
+import { toolRegistry } from './toolRegistry';
 
-// ── Event protocol ─────────────────────────────────────────────────────────────
+// Side-effect: registers all tools into toolRegistry
+import './tools/index';
+
+// ── Question definition (shared with frontend via SSE) ─────────────────────
+
+export interface QuestionDef {
+  kind: 'number' | 'choice' | 'position' | 'file';
+  key: string;
+  label: string;
+  // number
+  default?: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  // choice
+  options?: Array<{ label: string; value: string }>;
+  // file
+  accept?: string;
+}
+
+// ── SSE event protocol ─────────────────────────────────────────────────────
 
 type TimelinePatch =
   | { op: 'remove_segments'; segments: { startTime: number; endTime: number }[] }
@@ -33,96 +55,53 @@ export type SSEEvent =
   | { type: 'step_start'; name: string }
   | { type: 'step_done'; name: string; durationMs: number; patch?: TimelinePatch }
   | { type: 'done'; operationId: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'question'; question: QuestionDef };
 
-// ── Edit action types ──────────────────────────────────────────────────────────
+// ── ask_question tool definition ───────────────────────────────────────────
 
-type EditAction =
-  | { type: 'remove_fillers'; params: { customWords?: string[] } }
-  | { type: 'cut_segment'; params: { startTime: number; endTime: number } }
-  | { type: 'remove_silence'; params: { threshold?: number; minDuration?: number } }
-  | { type: 'remove_black_screens'; params: { minDuration?: number; threshold?: number } };
-
-const ACTION_LABELS: Record<EditAction['type'], string> = {
-  remove_fillers: '去除填充词',
-  cut_segment: '剪切片段',
-  remove_silence: '去除静默段',
-  remove_black_screens: '去除黑屏',
-};
-
-// ── System prompt ──────────────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = `You are Underlord, an AI assistant inside a professional video editor.
-When the user asks you to edit their video, respond conversationally in 1-2 sentences explaining what you are about to do.
-Respond in the same language the user uses (Chinese or English).
-Be concise and confident. Do NOT list steps, do NOT output JSON or code blocks.`;
-
-// ── Function calling tools ────────────────────────────────────────────────────
-
-const EDIT_TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'remove_fillers',
-      description: '删除视频中的填充词和口头禅（嗯、啊、那个、就是、um、uh、like）',
-      parameters: {
-        type: 'object',
-        properties: {
-          customWords: {
-            type: 'array',
-            items: { type: 'string' },
-            description: '额外要删除的词（可选）',
+const ASK_QUESTION_TOOL: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'ask_question',
+    description:
+      'Ask the user a clarifying question using a specific UI widget. ' +
+      'Use this when you need a parameter value that the user has not yet provided. ' +
+      'If the user already stated the value in their message or conversation history, use it directly without asking.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['number', 'choice', 'position', 'file'],
+          description: 'Widget type: number=slider, choice=buttons, position=3x3 grid, file=upload zone',
+        },
+        key: { type: 'string', description: 'Parameter name, e.g. "threshold"' },
+        label: { type: 'string', description: 'Question to display to the user' },
+        default: { type: 'number', description: 'Default value (number kind)' },
+        min: { type: 'number', description: 'Minimum value (number kind)' },
+        max: { type: 'number', description: 'Maximum value (number kind)' },
+        step: { type: 'number', description: 'Step size (number kind)' },
+        unit: { type: 'string', description: 'Unit label, e.g. "秒" (number kind)' },
+        options: {
+          type: 'array',
+          description: 'Options (choice kind)',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+              value: { type: 'string' },
+            },
           },
         },
+        accept: { type: 'string', description: 'MIME types to accept, e.g. "image/*" (file kind)' },
       },
+      required: ['kind', 'key', 'label'],
     },
   },
-  {
-    type: 'function',
-    function: {
-      name: 'cut_segment',
-      description: '删除视频中指定时间范围内的片段',
-      parameters: {
-        type: 'object',
-        required: ['startTime', 'endTime'],
-        properties: {
-          startTime: { type: 'number', description: '开始时间（秒）' },
-          endTime:   { type: 'number', description: '结束时间（秒）' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remove_silence',
-      description: '自动检测并删除视频中的静默/停顿片段',
-      parameters: {
-        type: 'object',
-        properties: {
-          threshold:   { type: 'number', description: '静音阈值 dB，默认 -40' },
-          minDuration: { type: 'number', description: '最短静默时长（秒），默认 0.5' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remove_black_screens',
-      description: '自动检测并删除视频中的黑屏片段',
-      parameters: {
-        type: 'object',
-        properties: {
-          minDuration: { type: 'number', description: '最短黑屏时长（秒），默认 0.5' },
-          threshold:   { type: 'number', description: '黑屏亮度阈值 0-1，默认 0.1' },
-        },
-      },
-    },
-  },
-];
+};
 
-// ── Build AI client ────────────────────────────────────────────────────────────
+// ── Build AI client ────────────────────────────────────────────────────────
 
 function buildAIClient(): OpenAI | null {
   const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -145,97 +124,59 @@ function buildAIClient(): OpenAI | null {
   return null;
 }
 
-// ── Keyword fallback intent parser ────────────────────────────────────────────
+// ── System prompt ──────────────────────────────────────────────────────────
 
-function fallbackParse(message: string): EditAction | null {
-  if (/嗯|啊|那个|就是|填充词|口头禅|filler/i.test(message))
-    return { type: 'remove_fillers', params: {} };
+function buildSystemPrompt(): string {
+  const capabilities = toolRegistry.describeCapabilities();
+  return `You are Underlord, an AI assistant inside a professional video editor.
+When the user asks you to edit their video, respond conversationally in 1-2 sentences.
+Respond in the same language the user uses (Chinese or English).
+Be concise and confident. Do NOT list steps, do NOT output JSON or code blocks.
 
-  const timeMatch = message.match(/(\d+(?:\.\d+)?)\s*[秒s].*?(\d+(?:\.\d+)?)\s*[秒s]/);
-  if (timeMatch)
-    return { type: 'cut_segment', params: { startTime: +timeMatch[1], endTime: +timeMatch[2] } };
+Currently supported operations: ${capabilities}.
 
-  if (/静[音默]|停顿|silence/i.test(message))
-    return { type: 'remove_silence', params: {} };
+Parameter collection rules:
+- If you need a parameter the user has NOT provided, call ask_question to show an interactive widget.
+- If the user already stated the value (e.g. "remove silence over 2 seconds"), use it directly — do NOT ask again.
+- User answers appear in conversation history as "[key: value]".
 
-  if (/黑屏|black.?screen/i.test(message))
-    return { type: 'remove_black_screens', params: {} };
-
-  return null;
+If the user requests something NOT in the supported operations list, respond with a friendly message listing what you can do.`;
 }
 
-// ── Intent parsing via function calling ──────────────────────────────────────
+// ── Intent parsing via function calling ───────────────────────────────────
 
 async function parseIntent(
   client: OpenAI,
   model: string,
   message: string,
   conversationHistory: { role: 'user' | 'assistant'; content: string }[],
-): Promise<EditAction | null> {
+): Promise<{ name: string; params: Record<string, any> } | null> {
   try {
     const completion = await client.chat.completions.create({
       model,
-      max_tokens: 128,
+      max_tokens: 256,
       messages: [
         ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
         { role: 'user', content: message },
       ],
-      tools: EDIT_TOOLS,
-      tool_choice: 'required',
+      tools: [...toolRegistry.getOpenAITools(), ASK_QUESTION_TOOL],
+      tool_choice: 'auto',
     });
 
     const call = completion.choices[0]?.message?.tool_calls?.[0];
     if (!call) return null;
 
-    const args = JSON.parse(call.function.arguments || '{}');
-    const name = call.function.name as EditAction['type'];
+    const name = call.function.name;
+    if (!toolRegistry.has(name) && name !== 'ask_question') return null;
 
-    switch (name) {
-      case 'remove_fillers':
-        return { type: 'remove_fillers', params: { customWords: args.customWords } };
-      case 'cut_segment':
-        return { type: 'cut_segment', params: { startTime: args.startTime, endTime: args.endTime } };
-      case 'remove_silence':
-        return { type: 'remove_silence', params: { threshold: args.threshold, minDuration: args.minDuration } };
-      case 'remove_black_screens':
-        return { type: 'remove_black_screens', params: { minDuration: args.minDuration, threshold: args.threshold } };
-      default:
-        return null;
-    }
+    return { name, params: JSON.parse(call.function.arguments || '{}') };
   } catch (err: any) {
-    console.warn('[underlordService] Function calling failed, falling back to keyword parse:', err.message);
+    console.warn('[underlordService] Function calling failed, falling back to keyword match:', err.message);
     return null;
   }
 }
 
-// ── Execute action → cutRegions ──────────────────────────────────────────────
-
-async function executeAction(
-  action: EditAction,
-  mediaId: string,
-  _mediaFilePath?: string,
-): Promise<{ startTime: number; endTime: number }[]> {
-  switch (action.type) {
-    case 'remove_fillers':
-      return executeRemoveFillers(mediaId, action.params.customWords);
-
-    case 'cut_segment':
-      return executeCutSegment(action.params.startTime, action.params.endTime);
-
-    case 'remove_silence':
-      if (!_mediaFilePath) throw new Error('媒体文件路径未知，无法检测静默');
-      return executeRemoveSilence(_mediaFilePath, action.params.threshold, action.params.minDuration);
-
-    case 'remove_black_screens':
-      if (!_mediaFilePath) throw new Error('媒体文件路径未知，无法检测黑屏');
-      return executeRemoveBlackScreens(_mediaFilePath, action.params.minDuration, action.params.threshold);
-
-    default:
-      throw new Error('未知操作类型');
-  }
-}
-
-// ── Main chat function ─────────────────────────────────────────────────────────
+// ── Main chat function ─────────────────────────────────────────────────────
 
 let opCounter = 0;
 
@@ -257,7 +198,7 @@ export async function chat(
     emit({ type: 'text', delta: '好的，我来帮你处理...' });
   } else {
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildSystemPrompt() },
       ...(params.conversationHistory || []).map(m => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
@@ -283,34 +224,49 @@ export async function chat(
     }
   }
 
-  // 2. Parse intent
-  let action: EditAction | null = null;
+  // 2. Parse intent — function calling first, then keyword fallback
+  let intent: { name: string; params: Record<string, any> } | null = null;
+
   if (client) {
-    action = await parseIntent(client, model, params.message, params.conversationHistory ?? []);
-  }
-  if (!action) {
-    action = fallbackParse(params.message);
+    intent = await parseIntent(client, model, params.message, params.conversationHistory ?? []);
   }
 
-  if (!action) {
+  // ask_question is only from LLM — no keyword fallback for it
+  if (!intent || intent.name === 'ask_question') {
+    if (intent?.name === 'ask_question') {
+      // LLM wants to collect a parameter — emit widget event and stop
+      emit({ type: 'question', question: intent.params as QuestionDef });
+      emit({ type: 'done', operationId: '' });
+      return;
+    }
+    intent = toolRegistry.fallbackMatch(params.message);
+  }
+
+  if (!intent) {
+    toolRegistry.logUnhandledRequest(params.message);
     emit({ type: 'done', operationId: '' });
     return;
   }
 
-  // 3. Execute + emit patch
-  const label = ACTION_LABELS[action.type];
+  // 3. Execute via registry + emit patch
+  const tool = toolRegistry.getAll().find(t => t.name === intent!.name);
+  const label = tool?.label ?? intent.name;
+
   emit({ type: 'plan', steps: [label] });
 
-  const startTime = Date.now();
+  const startMs = Date.now();
   emit({ type: 'step_start', name: label });
 
   try {
-    const cutRegions = await executeAction(action, params.mediaId, params.mediaFilePath);
-    const patch: TimelinePatch = { op: 'remove_segments', segments: cutRegions };
+    const patch = await toolRegistry.executeTool(intent.name, intent.params, {
+      mediaId: params.mediaId,
+      mediaFilePath: params.mediaFilePath,
+    });
+
     emit({
       type: 'step_done',
       name: label,
-      durationMs: Date.now() - startTime,
+      durationMs: Date.now() - startMs,
       patch,
     });
     emit({ type: 'done', operationId: `op-${++opCounter}` });

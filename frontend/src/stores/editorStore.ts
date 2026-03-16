@@ -23,6 +23,23 @@ import {
   Timeline 
 } from '@shared/types';
 
+// ── Timeline Patch Protocol ────────────────────────────────────────────────────
+
+export interface CutRegion {
+  startTime: number;
+  endTime: number;
+}
+
+export type TimelinePatch =
+  | { op: 'remove_segments'; segments: CutRegion[] }
+  | { op: 'restore_segments'; segments: CutRegion[] }
+  | { op: 'add_transition'; afterClipId: string; transition: object }
+  | { op: 'add_overlay'; overlay: object }
+  | { op: 'apply_audio_effect'; effect: string }
+  | { op: 'add_dubbing'; audioUrl: string; segments: { part: string; start: number; end: number }[] };
+
+// ── Store Types ────────────────────────────────────────────────────────────────
+
 interface TranscriptionStatus {
   id: string;
   status: 'idle' | 'processing' | 'completed' | 'error';
@@ -51,6 +68,7 @@ interface EditorState {
 
   // Video
   videoUrl: string | null;
+  dubbingAudioUrl: string | null;
   currentTime: number;
   duration: number;
   isPlaying: boolean;
@@ -86,6 +104,7 @@ interface EditorState {
 
   // Actions - Video
   setVideoUrl: (url: string | null) => void;
+  setDubbingAudioUrl: (url: string | null) => void;
   setCurrentTime: (time: number) => void;
   setDuration: (duration: number) => void;
   setIsPlaying: (isPlaying: boolean) => void;
@@ -103,6 +122,9 @@ interface EditorState {
   deleteSelectedWords: () => void;
   restoreDeletedWords: (segmentId: string, wordIndices: number[]) => void;
   cutSelection: () => void;
+
+  // Actions - Timeline Patch (AI edit → player sync)
+  applyPatch: (patch: TimelinePatch) => void;
 
   // Actions - Timeline
   setTimeline: (timeline: Timeline) => void;
@@ -137,6 +159,7 @@ const initialState = {
   isDirty: false,
   lastSavedAt: null,
   videoUrl: null,
+  dubbingAudioUrl: null,
   currentTime: 0,
   duration: 0,
   isPlaying: false,
@@ -190,6 +213,7 @@ export const useEditorStore = create<EditorState>()(
     // ========== Video Actions ==========
     
     setVideoUrl: (videoUrl) => set({ videoUrl }),
+    setDubbingAudioUrl: (dubbingAudioUrl) => set({ dubbingAudioUrl }),
     setCurrentTime: (currentTime) => set({ currentTime }),
     setDuration: (duration) => set({ duration }),
     setIsPlaying: (isPlaying) => set({ isPlaying }),
@@ -238,6 +262,32 @@ export const useEditorStore = create<EditorState>()(
         selectedWords: null,
         isDirty: true,
       });
+    },
+
+    applyPatch: (patch) => {
+      if (patch.op === 'remove_segments') {
+        const { transcript } = get();
+        if (!transcript) return;
+
+        get().pushHistory();
+
+        const updated = {
+          ...transcript,
+          segments: transcript.segments.map(segment => ({
+            ...segment,
+            words: segment.words.map(word => {
+              const inCut = patch.segments.some(
+                cut => word.startTime >= cut.startTime && word.endTime <= cut.endTime
+              );
+              return inCut ? { ...word, deleted: true } : word;
+            }),
+          })),
+        };
+
+        set({ transcript: updated, isDirty: true });
+      } else if (patch.op === 'add_dubbing') {
+        set({ dubbingAudioUrl: patch.audioUrl });
+      }
     },
 
     restoreDeletedWords: (segmentId, wordIndices) => {

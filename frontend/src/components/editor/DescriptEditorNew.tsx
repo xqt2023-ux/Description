@@ -97,6 +97,61 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
   const [canvasMode, setCanvasMode] = useState<'layout' | 'background'>('layout');
   const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
   const [customTracks, setCustomTracks] = useState<Array<{id: string; name: string; type: 'video' | 'audio' | 'text' | 'image'}>>([]);
+  const [timelineHeight, setTimelineHeight] = useState(200);
+  const [leftWidth, setLeftWidth] = useState(420);
+  const [rightPanelWidth, setRightPanelWidth] = useState(288);
+
+  const handleLeftPanelResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startLeft = leftWidth;
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: MouseEvent) => {
+      setLeftWidth(Math.max(240, Math.min(700, startLeft + ev.clientX - startX)));
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const handleRightPanelResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startRight = rightPanelWidth;
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: MouseEvent) => {
+      setRightPanelWidth(Math.max(200, Math.min(600, startRight + startX - ev.clientX)));
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const handleTimelineResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = timelineHeight;
+    document.body.style.cursor = 'ns-resize';
+    const onMove = (ev: MouseEvent) => {
+      const delta = startY - ev.clientY;
+      setTimelineHeight(Math.max(80, Math.min(600, startHeight + delta)));
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
   // Video clips for split functionality
   const [videoClips, setVideoClips] = useState<Array<{
     id: string;
@@ -790,7 +845,7 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Script */}
-        <aside className="w-[420px] bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <aside className="bg-white flex flex-col flex-shrink-0" style={{ width: leftWidth }}>
           {/* Script Header */}
           <div className="border-b border-gray-100">
             {/* Mode tabs */}
@@ -1059,6 +1114,15 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
           </div>
         </aside>
 
+        {/* Left Panel Resize Handle */}
+        <div
+          className="flex-shrink-0 flex items-center justify-center"
+          style={{ width: 6, cursor: 'col-resize', backgroundColor: '#e5e7eb' }}
+          onMouseDown={handleLeftPanelResizeMouseDown}
+        >
+          <div style={{ width: 3, height: 32, borderRadius: 9999, backgroundColor: '#9ca3af', pointerEvents: 'none' }} />
+        </div>
+
         {/* Center - Video Canvas */}
         <main className="flex-1 flex flex-col bg-[#2a2a2a] overflow-hidden">
           {/* Canvas Area */}
@@ -1164,8 +1228,17 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
           )}
         </main>
 
+        {/* Right Panel Resize Handle */}
+        <div
+          className="flex-shrink-0 flex items-center justify-center"
+          style={{ width: 6, cursor: 'col-resize', backgroundColor: '#252525' }}
+          onMouseDown={handleRightPanelResizeMouseDown}
+        >
+          <div style={{ width: 3, height: 32, borderRadius: 9999, backgroundColor: '#444', pointerEvents: 'none' }} />
+        </div>
+
         {/* Right Panel - Underlord */}
-        <aside className="flex bg-[#1e1e1e] border-l border-[#2a2a2a] flex-shrink-0">
+        <aside className="flex bg-[#1e1e1e] flex-shrink-0">
           {/* Narrow Icon Sidebar */}
           <div className="w-12 flex flex-col items-center py-2 gap-1 border-r border-[#2a2a2a]">
             {[
@@ -1206,7 +1279,7 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
           </div>
 
           {/* Panel Content */}
-          <div className="w-72 flex flex-col overflow-hidden">
+          <div className="flex flex-col overflow-hidden" style={{ width: rightPanelWidth }}>
             {rightPanel === 'underlord' ? (
               <InteractiveWorkflowSidebar />
             ) : rightPanel === 'ai-tools' ? (
@@ -1226,12 +1299,19 @@ export function DescriptEditor({ projectId, initialMediaId, initialMediaUrl, ini
         </aside>
       </div>
 
+      {/* Resize Handle */}
+      <div
+        className="flex-shrink-0 flex items-center justify-center"
+        style={{ height: 8, cursor: 'ns-resize', backgroundColor: '#252525' }}
+        onMouseDown={handleTimelineResizeMouseDown}
+      >
+        <div style={{ width: 48, height: 3, borderRadius: 9999, backgroundColor: '#444', pointerEvents: 'none' }} />
+      </div>
+
       {/* Bottom Timeline - Descript Style */}
       <div
-        className="bg-[#181818] border-t border-[#2a2a2a] flex flex-col flex-shrink-0"
-        style={{
-          height: `${Math.min(Math.max(200, 160 + customTracks.length * 48), 400)}px`
-        }}
+        className="bg-[#181818] flex flex-col flex-shrink-0"
+        style={{ height: timelineHeight }}
       >
         {/* Transport Controls - Descript Style */}
         <div className="h-11 border-b border-[#252525] flex items-center px-3 gap-2">

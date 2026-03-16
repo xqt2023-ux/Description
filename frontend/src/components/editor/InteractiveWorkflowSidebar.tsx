@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { underlordApi } from '@/lib/api';
-import { useEditorStore } from '@/stores/editorStore';
+import { useEditorStore, TimelinePatch } from '@/stores/editorStore';
 import {
   Sparkles,
   Send,
@@ -14,6 +14,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { QuestionWidget, QuestionDef } from './QuestionWidget';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -25,7 +26,7 @@ interface OperationStep {
   durationMs?: number;
 }
 
-interface ChatMessage {
+interface TextMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -35,18 +36,28 @@ interface ChatMessage {
   detailsOpen?: boolean;
 }
 
+interface QuestionMessage {
+  id: string;
+  role: 'question';
+  question: QuestionDef;
+  answered?: string;  // undefined = awaiting answer
+}
+
+type ChatMessage = TextMessage | QuestionMessage;
+
 type SSEEvent =
   | { type: 'text'; delta: string }
   | { type: 'plan'; steps: string[] }
   | { type: 'step_start'; name: string }
-  | { type: 'step_done'; name: string; durationMs: number }
+  | { type: 'step_done'; name: string; durationMs: number; patch?: TimelinePatch }
   | { type: 'done'; operationId: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'question'; question: QuestionDef };
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function InteractiveWorkflowSidebar() {
-  const { mediaFiles, duration } = useEditorStore();
+  const { mediaFiles, duration, applyPatch } = useEditorStore();
   const mediaId = mediaFiles[0]?.id;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -66,7 +77,7 @@ export function InteractiveWorkflowSidebar() {
     const handler = (e: Event) => {
       const { request, failed } = (e as CustomEvent).detail;
       if (failed) {
-        const errMsg: ChatMessage = {
+        const errMsg: TextMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',
           content: 'Transcription failed. Auto-edit cancelled.',
@@ -81,7 +92,14 @@ export function InteractiveWorkflowSidebar() {
     };
     window.addEventListener('auto-edit-request', handler);
     return () => window.removeEventListener('auto-edit-request', handler);
-  }, [mediaId]); // re-bind when mediaId becomes available
+  }, [mediaId]);
+
+  // ── Build conversation history for the backend ─────────────────────────
+  // Skip question messages (user's answer appears as a regular user message)
+  const buildHistory = (msgs: ChatMessage[]) =>
+    msgs
+      .filter((m): m is TextMessage => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
   // ── Send message ──────────────────────────────────────────────────────────
   const sendMessage = async (text?: string) => {
@@ -90,7 +108,7 @@ export function InteractiveWorkflowSidebar() {
 
     setInput('');
 
-    const userMsg: ChatMessage = {
+    const userMsg: TextMessage = {
       id: crypto.randomUUID(),
       role: 'user',
       content: msgText,
@@ -98,7 +116,7 @@ export function InteractiveWorkflowSidebar() {
     };
 
     const assistantId = crypto.randomUUID();
-    const assistantMsg: ChatMessage = {
+    const assistantMsg: TextMessage = {
       id: assistantId,
       role: 'assistant',
       content: '',
@@ -111,11 +129,15 @@ export function InteractiveWorkflowSidebar() {
     setIsStreaming(true);
 
     try {
+      const currentMessages = await new Promise<ChatMessage[]>(resolve => {
+        setMessages(prev => { resolve(prev); return prev; });
+      });
+
       const response = await underlordApi.chat({
         message: msgText,
         mediaId,
         mediaInfo: { duration: duration || 0, hasAudio: true },
-        conversationHistory: messages.map(m => ({ role: m.role, content: m.content })),
+        conversationHistory: buildHistory(currentMessages),
       });
 
       const reader = response.body!.getReader();
@@ -144,14 +166,16 @@ export function InteractiveWorkflowSidebar() {
       setMessages(prev =>
         prev.map(m =>
           m.id === assistantId
-            ? { ...m, status: 'error', content: m.content || (err.message || 'Connection failed') }
+            ? { ...m, status: 'error', content: (m as TextMessage).content || (err.message || 'Connection failed') } as TextMessage
             : m
         )
       );
     } finally {
       setMessages(prev =>
         prev.map(m =>
-          m.id === assistantId && m.status === 'streaming' ? { ...m, status: 'done' } : m
+          m.id === assistantId && (m as TextMessage).status === 'streaming'
+            ? { ...m, status: 'done' } as TextMessage
+            : m
         )
       );
       setIsStreaming(false);
@@ -160,44 +184,67 @@ export function InteractiveWorkflowSidebar() {
 
   // ── Apply SSE event to the in-progress assistant message ─────────────────
   const applySSEEvent = (msgId: string, event: SSEEvent) => {
+    if (event.type === 'question') {
+      // Add a new question message to the chat (not tied to the assistant bubble)
+      const qMsg: QuestionMessage = {
+        id: crypto.randomUUID(),
+        role: 'question',
+        question: event.question,
+      };
+      setMessages(prev => [...prev, qMsg]);
+      return;
+    }
+
     setMessages(prev =>
       prev.map(m => {
-        if (m.id !== msgId) return m;
+        if (m.id !== msgId || m.role !== 'assistant') return m;
+        const msg = m as TextMessage;
         switch (event.type) {
           case 'text':
-            return { ...m, content: m.content + event.delta };
+            return { ...msg, content: msg.content + event.delta };
           case 'plan':
             return {
-              ...m,
+              ...msg,
               steps: event.steps.map(name => ({ name, status: 'pending' as StepStatus })),
             };
           case 'step_start':
             return {
-              ...m,
-              steps: m.steps?.map(s => s.name === event.name ? { ...s, status: 'running' as StepStatus } : s),
+              ...msg,
+              steps: msg.steps?.map(s => s.name === event.name ? { ...s, status: 'running' as StepStatus } : s),
             };
           case 'step_done':
+            if (event.patch) applyPatch(event.patch);
             return {
-              ...m,
-              steps: m.steps?.map(s =>
+              ...msg,
+              steps: msg.steps?.map(s =>
                 s.name === event.name ? { ...s, status: 'done' as StepStatus, durationMs: event.durationMs } : s
               ),
             };
           case 'done':
-            return { ...m, status: 'done', operationId: event.operationId || undefined };
+            return { ...msg, status: 'done', operationId: event.operationId || undefined };
           case 'error':
-            return { ...m, status: 'error', content: m.content + (m.content ? '\n' : '') + event.message };
+            return { ...msg, status: 'error', content: msg.content + (msg.content ? '\n' : '') + event.message };
           default:
-            return m;
+            return msg;
         }
       })
     );
   };
 
+  // ── Handle widget answer ──────────────────────────────────────────────────
+  const handleAnswer = (questionMsgId: string, question: QuestionDef, value: string) => {
+    // Mark question as answered
+    setMessages(prev =>
+      prev.map(m => m.id === questionMsgId ? { ...m, answered: value } as QuestionMessage : m)
+    );
+    // Send answer as a new user message so LLM has context
+    sendMessage(`[${question.key}: ${value}]`);
+  };
+
   // ── Toggle Details section ────────────────────────────────────────────────
   const toggleDetails = (msgId: string) => {
     setMessages(prev =>
-      prev.map(m => m.id === msgId ? { ...m, detailsOpen: !m.detailsOpen } : m)
+      prev.map(m => m.id === msgId ? { ...m, detailsOpen: !(m as TextMessage).detailsOpen } : m)
     );
   };
 
@@ -239,78 +286,97 @@ export function InteractiveWorkflowSidebar() {
           </div>
         )}
 
-        {messages.map(msg => (
-          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            {msg.role === 'user' ? (
-              // User bubble
-              <div className="max-w-[85%] px-3 py-2 bg-[#7c3aed] rounded-2xl rounded-tr-sm">
-                <p className="text-xs text-white leading-relaxed">{msg.content}</p>
-              </div>
-            ) : (
-              // Assistant message
-              <div className="max-w-[95%] space-y-2">
-                {/* Text content */}
-                <div className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">
-                  {msg.content}
-                  {msg.status === 'streaming' && !msg.content && (
-                    <span className="inline-flex gap-0.5 items-center">
-                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </span>
-                  )}
-                  {msg.status === 'streaming' && msg.content && (
-                    <span className="inline-block w-0.5 h-3.5 bg-purple-400 animate-pulse ml-0.5 align-middle" />
-                  )}
+        {messages.map(msg => {
+          // ── Question widget message ──
+          if (msg.role === 'question') {
+            return (
+              <div key={msg.id} className="flex justify-start">
+                <div className="max-w-[95%] w-full">
+                  <QuestionWidget
+                    question={msg.question}
+                    answered={msg.answered}
+                    onAnswer={value => handleAnswer(msg.id, msg.question, value)}
+                  />
                 </div>
+              </div>
+            );
+          }
 
-                {/* Details collapsible */}
-                {msg.steps && msg.steps.length > 0 && (
-                  <div className="border border-[#2a2a2a] rounded-lg overflow-hidden">
-                    <button
-                      onClick={() => toggleDetails(msg.id)}
-                      className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-gray-500 hover:text-gray-300 hover:bg-[#1c1c1c] transition"
-                    >
-                      {msg.detailsOpen
-                        ? <ChevronDown className="w-3 h-3" />
-                        : <ChevronRight className="w-3 h-3" />}
-                      Details
-                    </button>
-                    {msg.detailsOpen && (
-                      <div className="border-t border-[#2a2a2a] divide-y divide-[#222]">
-                        {msg.steps.map((step, i) => (
-                          <div key={i} className="flex items-center gap-2 px-3 py-1.5">
-                            <StepIcon status={step.status} />
-                            <span className="flex-1 text-[11px] text-gray-400">{step.name}</span>
-                            {step.durationMs !== undefined && (
-                              <span className="text-[10px] text-gray-600">
-                                {step.durationMs < 1000
-                                  ? `${step.durationMs}ms`
-                                  : `${(step.durationMs / 1000).toFixed(1)}s`}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+          const textMsg = msg as TextMessage;
+
+          return (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              {msg.role === 'user' ? (
+                // User bubble
+                <div className="max-w-[85%] px-3 py-2 bg-[#7c3aed] rounded-2xl rounded-tr-sm">
+                  <p className="text-xs text-white leading-relaxed">{textMsg.content}</p>
+                </div>
+              ) : (
+                // Assistant message
+                <div className="max-w-[95%] space-y-2">
+                  {/* Text content */}
+                  <div className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">
+                    {textMsg.content}
+                    {textMsg.status === 'streaming' && !textMsg.content && (
+                      <span className="inline-flex gap-0.5 items-center">
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </span>
+                    )}
+                    {textMsg.status === 'streaming' && textMsg.content && (
+                      <span className="inline-block w-0.5 h-3.5 bg-purple-400 animate-pulse ml-0.5 align-middle" />
                     )}
                   </div>
-                )}
 
-                {/* Revert button */}
-                {msg.status === 'done' && msg.operationId && (
-                  <button
-                    onClick={() => handleRevert(msg.operationId!, msg.id)}
-                    className="flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-purple-400 transition"
-                    aria-label="Revert"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    Revert
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
+                  {/* Details collapsible */}
+                  {textMsg.steps && textMsg.steps.length > 0 && (
+                    <div className="border border-[#2a2a2a] rounded-lg overflow-hidden">
+                      <button
+                        onClick={() => toggleDetails(msg.id)}
+                        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-gray-500 hover:text-gray-300 hover:bg-[#1c1c1c] transition"
+                      >
+                        {textMsg.detailsOpen
+                          ? <ChevronDown className="w-3 h-3" />
+                          : <ChevronRight className="w-3 h-3" />}
+                        Details
+                      </button>
+                      {textMsg.detailsOpen && (
+                        <div className="border-t border-[#2a2a2a] divide-y divide-[#222]">
+                          {textMsg.steps.map((step, i) => (
+                            <div key={i} className="flex items-center gap-2 px-3 py-1.5">
+                              <StepIcon status={step.status} />
+                              <span className="flex-1 text-[11px] text-gray-400">{step.name}</span>
+                              {step.durationMs !== undefined && (
+                                <span className="text-[10px] text-gray-600">
+                                  {step.durationMs < 1000
+                                    ? `${step.durationMs}ms`
+                                    : `${(step.durationMs / 1000).toFixed(1)}s`}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Revert button */}
+                  {textMsg.status === 'done' && textMsg.operationId && (
+                    <button
+                      onClick={() => handleRevert(textMsg.operationId!, msg.id)}
+                      className="flex items-center gap-1.5 text-[11px] text-gray-500 hover:text-purple-400 transition"
+                      aria-label="Revert"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Revert
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* ── Input bar ── */}

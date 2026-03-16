@@ -17,6 +17,28 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const [showSidebar, setShowSidebar] = useState(true);
   const showWorkflowSidebar = false;
 
+  // Resizable timeline panel
+  const [timelineHeight, setTimelineHeight] = useState(192);
+
+  const handleResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = timelineHeight;
+    document.body.style.cursor = 'ns-resize';
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = startY - ev.clientY;
+      setTimelineHeight(Math.max(80, Math.min(600, startHeight + delta)));
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   return (
     <div className="h-screen flex flex-col bg-editor-bg">
       {/* Top Toolbar */}
@@ -77,8 +99,23 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         )}
       </div>
 
-      {/* Bottom - Timeline */}
-      <div className="h-48 border-t border-editor-border bg-editor-surface">
+      {/* Resize Handle between main content and timeline */}
+      <div
+        className="flex-shrink-0 flex items-center justify-center group"
+        style={{ height: 8, cursor: 'ns-resize', backgroundColor: '#2a2a40' }}
+        onMouseDown={handleResizeMouseDown}
+      >
+        <div
+          className="w-12 rounded-full transition-colors"
+          style={{ height: 3, backgroundColor: '#4a4a6a', pointerEvents: 'none' }}
+        />
+      </div>
+
+      {/* Bottom - Timeline (resizable) */}
+      <div
+        className="bg-editor-surface flex-shrink-0"
+        style={{ height: timelineHeight }}
+      >
         <Timeline />
       </div>
     </div>

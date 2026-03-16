@@ -46,7 +46,9 @@ import {
   deleteWorkflow,
 } from '../services/interactiveEditWorkflow';
 import { chat as underlordChat } from '../services/underlordService';
+import { exportTimeline } from '../services/videoProcessing';
 import { getMediaById } from './media';
+import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
@@ -650,7 +652,9 @@ router.post('/workflow/create', async (req: Request, res: Response) => {
 
     // Resolve the local file path so step execution can find the video
     let mediaFilePath: string | undefined;
-    if (media?.url) {
+    if (media?.filePath && fs.existsSync(media.filePath)) {
+      mediaFilePath = media.filePath;
+    } else if (media?.url) {
       const urlPath = (media.url as string)
         .replace(/^https?:\/\/[^/]+/, '')
         .replace(/^\//, '');
@@ -961,15 +965,17 @@ router.post('/underlord', async (req: Request, res: Response) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
-  // Resolve media file path
+  // Resolve media file path — prefer stored filePath, fallback to URL-derived path
   const media = getMediaById(mediaId);
   let mediaFilePath: string | undefined;
-  if (media?.url) {
+  if (media?.filePath && fs.existsSync(media.filePath)) {
+    mediaFilePath = media.filePath;
+  } else if (media?.url) {
     const urlPath = (media.url as string)
       .replace(/^https?:\/\/[^/]+/, '')
       .replace(/^\//, '');
-    const candidate = require('path').join(process.cwd(), urlPath);
-    if (require('fs').existsSync(candidate)) mediaFilePath = candidate;
+    const candidate = path.join(process.cwd(), urlPath);
+    if (fs.existsSync(candidate)) mediaFilePath = candidate;
   }
 
   const emit = (event: any) => {
@@ -983,6 +989,77 @@ router.post('/underlord', async (req: Request, res: Response) => {
     );
   } catch (err: any) {
     emit({ type: 'error', message: err.message || 'Internal error' });
+  }
+
+  res.end();
+});
+
+/**
+ * POST /api/ai/underlord/export
+ * SSE export endpoint — applies cut regions and produces a downloadable video
+ * Body: { mediaId: string, cuts: { startTime: number, endTime: number }[] }
+ * SSE: { type: 'progress', percent } → { type: 'done', downloadUrl }
+ */
+router.post('/underlord/export', async (req: Request, res: Response) => {
+  const { mediaId, cuts } = req.body;
+
+  if (!mediaId) {
+    return res.status(400).json({ success: false, error: 'mediaId is required' });
+  }
+  if (!Array.isArray(cuts)) {
+    return res.status(400).json({ success: false, error: 'cuts must be an array' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  const emit = (event: object) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+
+  try {
+    // Resolve media file path
+    const media = getMediaById(mediaId);
+    if (!media) {
+      emit({ type: 'error', message: 'Media file not found' });
+      return res.end();
+    }
+
+    let mediaFilePath: string | undefined;
+    if (media.filePath) {
+      mediaFilePath = media.filePath;
+    } else if (media.url) {
+      const urlPath = (media.url as string).replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '');
+      const candidate = path.join(process.cwd(), urlPath);
+      if (fs.existsSync(candidate)) mediaFilePath = candidate;
+    }
+
+    if (!mediaFilePath || !fs.existsSync(mediaFilePath)) {
+      emit({ type: 'error', message: 'Media file not found on disk' });
+      return res.end();
+    }
+
+    // Prepare output file
+    const jobId = uuidv4();
+    const exportsDir = process.env.UPLOAD_DIR
+      ? path.join(process.env.UPLOAD_DIR, 'exports')
+      : path.join(process.cwd(), 'uploads', 'exports');
+    if (!fs.existsSync(exportsDir)) fs.mkdirSync(exportsDir, { recursive: true });
+    const outputPath = path.join(exportsDir, `edited-${jobId}.mp4`);
+
+    // Run FFmpeg export with progress streaming
+    await exportTimeline(
+      { sourceFile: mediaFilePath, cutRegions: cuts, options: { format: 'mp4', resolution: '1080p', quality: 'high' }, outputPath },
+      (progress) => {
+        emit({ type: 'progress', percent: progress.percent, operation: progress.currentOperation });
+      }
+    );
+
+    const downloadUrl = `/api/exports/download/edited-${jobId}.mp4`;
+    emit({ type: 'done', downloadUrl });
+  } catch (err: any) {
+    emit({ type: 'error', message: err.message || 'Export failed' });
   }
 
   res.end();

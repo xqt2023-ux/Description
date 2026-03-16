@@ -12,7 +12,7 @@
 'use client';
 
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import { useEditorStore } from '@/stores/editorStore';
+import { useEditorStore, selectDeletedWordRanges } from '@/stores/editorStore';
 import { 
   ZoomIn, 
   ZoomOut, 
@@ -42,11 +42,12 @@ export function Timeline() {
   const [dragClipStartTime, setDragClipStartTime] = useState(0);
   const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
 
-  const { 
-    currentTime, 
-    duration, 
-    tracks, 
-    setCurrentTime, 
+  const {
+    currentTime,
+    duration,
+    tracks,
+    transcript,
+    setCurrentTime,
     updateTrack,
     addTrack,
     removeTrack,
@@ -54,7 +55,13 @@ export function Timeline() {
     removeClip,
   } = useEditorStore();
 
-  const pixelsPerSecond = 50 * zoom;
+  // Cut regions derived from transcript deleted words — shown as red overlays on clips
+  const cutRegions = useMemo(
+    () => selectDeletedWordRanges(transcript),
+    [transcript]
+  );
+
+  const pixelsPerSecond = 100 * zoom;
   const timelineWidth = Math.max(duration * pixelsPerSecond, 800);
 
   const handleTimelineClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -201,14 +208,15 @@ export function Timeline() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [deleteSelectedClip, handleSplitAtPlayhead]);
 
-  // Memoized time markers for 60fps performance (T028)
-  const timeMarkers = useMemo(() => {
-    const markers = [];
-    const step = zoom >= 2 ? 0.5 : zoom >= 1 ? 1 : 2;
-    for (let i = 0; i <= Math.ceil(duration); i += step) {
-      markers.push(i);
+  // Time ruler: labeled tick every N seconds, adaptive to zoom
+  // zoom 1x → 2s, zoom 2x → 1s, zoom 0.5x → 5s
+  const rulerMarkers = useMemo(() => {
+    const step = zoom >= 4 ? 0.5 : zoom >= 2 ? 1 : zoom >= 0.75 ? 2 : 5;
+    const markers: number[] = [];
+    for (let t = 0; t <= duration + step; t = Math.round((t + step) * 100) / 100) {
+      markers.push(t);
     }
-    return markers;
+    return { markers, step };
   }, [duration, zoom]);
 
   return (
@@ -323,16 +331,18 @@ export function Timeline() {
           style={{ width: timelineWidth }}
           onClick={handleTimelineClick}
         >
-          {/* Time Ruler */}
-          <div className="h-6 border-b border-editor-border relative">
-            {Array.from({ length: Math.ceil(duration) + 1 }).map((_, i) => (
+          {/* Time Ruler — labeled tick every N seconds (adaptive to zoom) */}
+          <div className="h-6 border-b border-editor-border relative select-none">
+            {rulerMarkers.markers.map((t) => (
               <div
-                key={i}
-                className="absolute top-0 h-full flex flex-col items-center"
-                style={{ left: i * pixelsPerSecond }}
+                key={t}
+                className="absolute top-0 flex flex-col items-center"
+                style={{ left: t * pixelsPerSecond }}
               >
-                <div className="h-2 w-px bg-editor-border" />
-                <span className="text-xs text-editor-muted">{i}s</span>
+                <div className="w-px h-2.5 bg-editor-muted/40" />
+                <span className="text-[10px] text-editor-muted mt-0.5 translate-x-1">
+                  {`${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`}
+                </span>
               </div>
             ))}
           </div>
@@ -352,10 +362,10 @@ export function Timeline() {
                 <p>Add media to start editing</p>
               </div>
             ) : (
-              tracks.map((track, index) => (
+              tracks.map((track) => (
                 <div
                   key={track.id}
-                  className="h-32 border-b border-editor-border relative"
+                  className="h-14 border-b border-editor-border relative"
                 >
                   {/* Track Label */}
                   <div className="absolute left-0 top-0 bottom-0 w-32 bg-editor-bg border-r border-editor-border flex flex-col justify-center px-2 z-10">
@@ -403,6 +413,7 @@ export function Timeline() {
                         track={track}
                         pixelsPerSecond={pixelsPerSecond}
                         isSelected={selectedClipId === clip.id}
+                        cutRegions={cutRegions}
                         onMouseDown={(e) => handleClipMouseDown(e, clip, track)}
                       />
                     ))}
@@ -425,30 +436,37 @@ function formatTime(seconds: number): string {
 }
 
 // Timeline Clip Component with Thumbnails/Waveform
+interface CutRegionEntry {
+  segmentId: string;
+  startTime: number;
+  endTime: number;
+}
+
 interface TimelineClipProps {
   clip: Clip;
   track: Track;
   pixelsPerSecond: number;
   isSelected: boolean;
+  cutRegions: CutRegionEntry[];
   onMouseDown: (e: React.MouseEvent) => void;
 }
 
-// Track height in pixels (matches h-32 = 128px for clearer thumbnails)
-const TRACK_HEIGHT = 128;
+// Each thumbnail tile is displayed at this fixed width (CapCut style: fixed size, tiled to fill)
+// 56px track height × (16/9) ≈ 100px, but 72px keeps a denser look for short clips
+const THUMB_TILE_WIDTH = 72;
 
-function TimelineClip({ clip, track, pixelsPerSecond, isSelected, onMouseDown }: TimelineClipProps) {
+function TimelineClip({ clip, track, pixelsPerSecond, isSelected, cutRegions, onMouseDown }: TimelineClipProps) {
   const clipWidth = clip.duration * pixelsPerSecond;
-  
-  // Simply show all available thumbnails, evenly distributed across the clip
-  // With 1fps generation, a 53s video has ~53 thumbnails
   const thumbnails = clip.thumbnails || [];
-  const thumbnailWidth = thumbnails.length > 0 ? clipWidth / thumbnails.length : clipWidth;
-  
+
+  // CapCut style: tile thumbnails at a fixed width, cycling through available frames
+  const tilesNeeded = thumbnails.length > 0 ? Math.max(1, Math.ceil(clipWidth / THUMB_TILE_WIDTH)) : 0;
+
   return (
     <div
       className={`absolute top-0 bottom-0 rounded-md cursor-move overflow-hidden transition-shadow ${
-        isSelected 
-          ? 'ring-2 ring-primary-400 shadow-lg' 
+        isSelected
+          ? 'ring-2 ring-primary-400 shadow-lg'
           : 'hover:ring-1 hover:ring-primary-400/50'
       }`}
       style={{
@@ -457,24 +475,22 @@ function TimelineClip({ clip, track, pixelsPerSecond, isSelected, onMouseDown }:
       }}
       onMouseDown={onMouseDown}
     >
-      {/* Video Clip with Thumbnails - Descript Style */}
+      {/* Video Clip with Thumbnails - CapCut Style (fixed-width tiles) */}
       {track.type === 'video' && (
         <div className="absolute inset-0 bg-editor-bg overflow-hidden">
           {thumbnails.length > 0 ? (
-            <div className="absolute inset-0 flex">
-              {thumbnails.map((thumb, i) => (
+            <div className="absolute inset-0 flex overflow-hidden">
+              {Array.from({ length: tilesNeeded }).map((_, i) => (
                 <div
                   key={i}
-                  className="h-full flex-shrink-0"
-                  style={{
-                    width: thumbnailWidth,
-                  }}
+                  className="h-full flex-shrink-0 overflow-hidden"
+                  style={{ width: THUMB_TILE_WIDTH }}
                 >
-                  {/* Thumbnail image - fixed size, object-cover to fill */}
                   <img
-                    src={thumb}
+                    src={thumbnails[i % thumbnails.length]}
                     alt=""
-                    className="w-full h-full object-cover object-center"
+                    className="h-full object-cover"
+                    style={{ width: THUMB_TILE_WIDTH }}
                     draggable={false}
                   />
                 </div>
@@ -501,6 +517,21 @@ function TimelineClip({ clip, track, pixelsPerSecond, isSelected, onMouseDown }:
           <div className="absolute right-1 bottom-1 px-1.5 py-0.5 bg-black/60 rounded text-xs text-white/80">
             {formatDuration(clip.duration)}
           </div>
+
+          {/* Cut region overlays — red semi-transparent marks for deleted segments */}
+          {cutRegions
+            .filter(r => r.startTime < clip.startTime + clip.duration && r.endTime > clip.startTime)
+            .map((r, i) => (
+              <div
+                key={i}
+                className="absolute inset-y-0 bg-red-500/50 border-l-2 border-r-2 border-red-400 z-10 pointer-events-none"
+                title={`已剪切 ${(r.endTime - r.startTime).toFixed(2)}s`}
+                style={{
+                  left: Math.max(0, (r.startTime - clip.startTime) * pixelsPerSecond),
+                  width: (Math.min(r.endTime, clip.startTime + clip.duration) - Math.max(r.startTime, clip.startTime)) * pixelsPerSecond,
+                }}
+              />
+            ))}
         </div>
       )}
 

@@ -297,6 +297,13 @@ export const underlordApi = {
     });
   },
   revert: (operationId: string) => api.post(`/ai/underlord/revert/${operationId}`),
+  export: (mediaId: string, cuts: { startTime: number; endTime: number }[]): Promise<Response> => {
+    return fetch(`${API_BASE_URL}/api/ai/underlord/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mediaId, cuts }),
+    });
+  },
 };
 
 // Direct file download helper
